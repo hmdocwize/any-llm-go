@@ -4,11 +4,13 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/packages/respjson"
 	"github.com/openai/openai-go/shared"
 
 	"github.com/mozilla-ai/any-llm-go/config"
@@ -377,6 +379,18 @@ func convertChunk(chunk *openai.ChatCompletionChunk) providers.ChatCompletionChu
 			}
 		}
 
+		// Reasoning/extended-thinking deltas are non-standard OpenAI fields that
+		// reasoning models (DeepSeek-R1, Moonshot Kimi, etc.) stream via the
+		// OpenAI-compatible surface — most commonly as a string field named
+		// "reasoning_content" (some emit "reasoning"). The generated openai-go
+		// struct has no field for them, so they land in Delta.JSON.ExtraFields.
+		// Copy whichever is present into the typed ChunkDelta.Reasoning so callers
+		// can surface a live reasoning trace. A "reasoning" object (vs a string)
+		// simply fails the string unmarshal and is skipped — never fatal.
+		if reasoning := reasoningDeltaContent(choice.Delta.JSON.ExtraFields); reasoning != "" {
+			chunkChoice.Delta.Reasoning = &providers.Reasoning{Content: reasoning}
+		}
+
 		choices = append(choices, chunkChoice)
 	}
 
@@ -398,6 +412,32 @@ func convertChunk(chunk *openai.ChatCompletionChunk) providers.ChatCompletionChu
 	}
 
 	return result
+}
+
+// reasoningDeltaContent extracts streamed reasoning/extended-thinking text from a
+// chunk delta's non-standard ExtraFields. It checks "reasoning_content" first
+// (DeepSeek-R1 / Moonshot Kimi / Cloudflare Workers AI) then "reasoning". The raw
+// value is JSON, so it is unmarshalled into a string; a non-string value (e.g. a
+// "reasoning" object) fails the unmarshal and is skipped. Returns "" when absent.
+func reasoningDeltaContent(extra map[string]respjson.Field) string {
+	// NB: openai-go does not set status=valid on ExtraFields entries (Valid()
+	// returns false for them), it only stores their Raw() JSON — so key off Raw,
+	// not Valid, or the field is silently dropped.
+	for _, key := range []string{"reasoning_content", "reasoning"} {
+		field, ok := extra[key]
+		if !ok {
+			continue
+		}
+		raw := field.Raw()
+		if raw == "" || raw == respjson.Null {
+			continue
+		}
+		var content string
+		if err := json.Unmarshal([]byte(raw), &content); err == nil && content != "" {
+			return content
+		}
+	}
+	return ""
 }
 
 // convertEmbeddingParams converts provider embedding params to OpenAI format.
