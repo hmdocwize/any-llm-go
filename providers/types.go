@@ -95,7 +95,7 @@ type Capabilities struct {
 	CompletionImage     bool
 	CompletionPDF       bool
 	CompletionReasoning bool
-	CompletionStreaming  bool
+	CompletionStreaming bool
 	CompletionTools     bool
 	Embedding           bool
 	ListModels          bool
@@ -367,6 +367,12 @@ type Usage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
+	// CachedPromptTokens is the subset of PromptTokens served from the
+	// provider's prompt/prefix cache (OpenAI prompt_tokens_details.cached_tokens).
+	// Providers that do server-side prefix caching (OpenAI, Cloudflare Workers AI)
+	// report it here so callers can attribute the discounted cached portion; 0
+	// when the provider does not report cached tokens.
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
 }
 
 // ContentParts extracts content parts from a message.

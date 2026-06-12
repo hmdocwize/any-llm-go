@@ -405,9 +405,10 @@ func convertChunk(chunk *openai.ChatCompletionChunk) providers.ChatCompletionChu
 
 	if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
 		result.Usage = &providers.Usage{
-			PromptTokens:     int(chunk.Usage.PromptTokens),
-			CompletionTokens: int(chunk.Usage.CompletionTokens),
-			TotalTokens:      int(chunk.Usage.TotalTokens),
+			PromptTokens:       int(chunk.Usage.PromptTokens),
+			CompletionTokens:   int(chunk.Usage.CompletionTokens),
+			TotalTokens:        int(chunk.Usage.TotalTokens),
+			CachedPromptTokens: int(chunk.Usage.PromptTokensDetails.CachedTokens),
 		}
 	}
 
@@ -621,9 +622,10 @@ func convertResponse(resp *openai.ChatCompletion) *providers.ChatCompletion {
 
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
 		result.Usage = &providers.Usage{
-			PromptTokens:     int(resp.Usage.PromptTokens),
-			CompletionTokens: int(resp.Usage.CompletionTokens),
-			TotalTokens:      int(resp.Usage.TotalTokens),
+			PromptTokens:       int(resp.Usage.PromptTokens),
+			CompletionTokens:   int(resp.Usage.CompletionTokens),
+			TotalTokens:        int(resp.Usage.TotalTokens),
+			CachedPromptTokens: int(resp.Usage.PromptTokensDetails.CachedTokens),
 		}
 		if resp.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
 			result.Usage.ReasoningTokens = int(resp.Usage.CompletionTokensDetails.ReasoningTokens)
