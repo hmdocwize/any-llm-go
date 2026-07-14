@@ -86,6 +86,13 @@ type CompatibleConfig struct {
 	// returns an error if none of those yield a value. Used by providers that
 	// have no sensible default endpoint (e.g. gateway).
 	RequireBaseURL bool
+
+	// UseResponsesAPIForReasoningTools routes requests that combine function
+	// tools with a non-none reasoning effort to POST /v1/responses. OpenAI's
+	// reasoning models reject that combination on /v1/chat/completions, but
+	// only the OpenAI platform itself serves the Responses API — compatible
+	// endpoints (DeepSeek, Groq, gateways, Workers AI) must leave this false.
+	UseResponsesAPIForReasoningTools bool
 }
 
 // Ensure CompatibleProvider implements the required interfaces.
@@ -173,6 +180,10 @@ func (p *CompatibleProvider) Completion(
 		return nil, err
 	}
 
+	if p.shouldUseResponsesAPI(params) {
+		return p.completionViaResponses(ctx, params)
+	}
+
 	req := convertParams(params)
 	if p.compatibleConfig.ChatCompletionRequestTransform != nil {
 		p.compatibleConfig.ChatCompletionRequestTransform(&req)
@@ -200,6 +211,11 @@ func (p *CompatibleProvider) CompletionStream(
 
 		if err := validateCompletionParams(params); err != nil {
 			errs <- err
+			return
+		}
+
+		if p.shouldUseResponsesAPI(params) {
+			p.streamCompletionViaResponses(ctx, params, chunks, errs)
 			return
 		}
 

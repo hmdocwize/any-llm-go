@@ -30,11 +30,12 @@ type Provider struct {
 // New creates a new OpenAI provider.
 func New(opts ...config.Option) (*Provider, error) {
 	base, err := NewCompatible(CompatibleConfig{
-		APIKeyEnvVar:   envAPIKey,
-		Capabilities:   capabilities(),
-		DefaultBaseURL: defaultBaseURL,
-		Name:           providerName,
-		RequireAPIKey:  true,
+		APIKeyEnvVar:                     envAPIKey,
+		Capabilities:                     capabilities(),
+		DefaultBaseURL:                   defaultBaseURL,
+		Name:                             providerName,
+		RequireAPIKey:                    true,
+		UseResponsesAPIForReasoningTools: true,
 	}, opts...)
 	if err != nil {
 		return nil, err
