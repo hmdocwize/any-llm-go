@@ -186,6 +186,7 @@ func (p *CompatibleProvider) Completion(
 	}
 
 	req := convertParams(params)
+	p.applyExplicitNoneEffort(&req, params)
 	if p.compatibleConfig.ChatCompletionRequestTransform != nil {
 		p.compatibleConfig.ChatCompletionRequestTransform(&req)
 	}
@@ -221,6 +222,7 @@ func (p *CompatibleProvider) CompletionStream(
 		}
 
 		req := convertParams(params)
+		p.applyExplicitNoneEffort(&req, params)
 		if p.compatibleConfig.ChatCompletionRequestTransform != nil {
 			p.compatibleConfig.ChatCompletionRequestTransform(&req)
 		}
@@ -246,6 +248,21 @@ func (p *CompatibleProvider) CompletionStream(
 	}()
 
 	return chunks, errs
+}
+
+// applyExplicitNoneEffort sends reasoning_effort:"none" on the wire when the
+// caller asked for none alongside function tools. convertParams drops "none"
+// (correct for OpenAI-compatible endpoints that reject the parameter), but
+// OpenAI's reasoning models default reasoning ON, and with tools present a
+// chat-completions request without an explicit "none" is rejected outright —
+// so on the OpenAI platform (same config gate as the Responses API routing)
+// the "none" must actually reach the wire.
+func (p *CompatibleProvider) applyExplicitNoneEffort(req *openai.ChatCompletionNewParams, params providers.CompletionParams) {
+	if p.compatibleConfig.UseResponsesAPIForReasoningTools &&
+		len(params.Tools) > 0 &&
+		params.ReasoningEffort == providers.ReasoningEffortNone {
+		req.ReasoningEffort = shared.ReasoningEffort(providers.ReasoningEffortNone)
+	}
 }
 
 // ConvertError converts OpenAI-compatible errors to unified error types.
