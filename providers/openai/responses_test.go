@@ -246,3 +246,103 @@ func TestConvertResponsesParamsTemperature(t *testing.T) {
 		t.Errorf("temperature = %v, want 0.3", wire["temperature"])
 	}
 }
+
+// TestConvertMessagesMultiModalToolResult (chat path) verifies a tool message
+// carrying image parts expands to a text tool message plus a follow-up user
+// message with the images — Chat Completions tool messages are text-only.
+func TestConvertMessagesMultiModalToolResult(t *testing.T) {
+	messages, err := convertMessages([]providers.Message{
+		{Role: providers.RoleAssistant, ToolCalls: []providers.ToolCall{{
+			ID: "call_1", Type: "function",
+			Function: providers.FunctionCall{Name: "read_cf_image", Arguments: "{}"},
+		}}},
+		{Role: providers.RoleTool, ToolCallID: "call_1", Content: []providers.ContentPart{
+			{Type: contentTypeText, Text: "page 3 rendered"},
+			{Type: contentTypeImageURL, ImageURL: &providers.ImageURL{URL: "data:image/png;base64,AAAA"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("convertMessages: %v", err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("messages = %d, want 3 (assistant, tool, user-with-image)", len(messages))
+	}
+
+	raw, _ := json.Marshal(messages)
+	var wire []map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	toolMsg := wire[1]
+	if toolMsg["role"] != "tool" || toolMsg["content"] != "page 3 rendered" || toolMsg["tool_call_id"] != "call_1" {
+		t.Errorf("tool message = %v", toolMsg)
+	}
+	userMsg := wire[2]
+	if userMsg["role"] != "user" {
+		t.Fatalf("follow-up role = %v, want user", userMsg["role"])
+	}
+	content, _ := userMsg["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("user content parts = %d, want 2 (header + image): %s", len(content), raw)
+	}
+	imagePart, _ := content[1].(map[string]any)
+	imageURL, _ := imagePart["image_url"].(map[string]any)
+	if imagePart["type"] != "image_url" || imageURL["url"] != "data:image/png;base64,AAAA" {
+		t.Errorf("image part = %v", imagePart)
+	}
+}
+
+// TestConvertMessagesTextPartsToolResult verifies a tool result with only
+// text parts joins them into the tool message (previously flattened to "").
+func TestConvertMessagesTextPartsToolResult(t *testing.T) {
+	messages, err := convertMessages([]providers.Message{
+		{Role: providers.RoleTool, ToolCallID: "call_1", Content: []providers.ContentPart{
+			{Type: contentTypeText, Text: "line one"},
+			{Type: contentTypeText, Text: "line two"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("convertMessages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(messages))
+	}
+	raw, _ := json.Marshal(messages[0])
+	var wire map[string]any
+	_ = json.Unmarshal(raw, &wire)
+	if wire["content"] != "line one\nline two" {
+		t.Errorf("content = %q, want joined text", wire["content"])
+	}
+}
+
+// TestConvertResponsesInputMultiModalToolResult (responses path) verifies the
+// same expansion: function_call_output text plus a user message with images.
+func TestConvertResponsesInputMultiModalToolResult(t *testing.T) {
+	items := convertResponsesInput([]providers.Message{
+		{Role: providers.RoleTool, ToolCallID: "call_1", Content: []providers.ContentPart{
+			{Type: contentTypeImageURL, ImageURL: &providers.ImageURL{URL: "data:image/png;base64,BBBB"}},
+		}},
+	})
+	raw, _ := json.Marshal(items)
+	var wire []map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(wire) != 2 {
+		t.Fatalf("items = %d, want 2 (function_call_output + user image message): %s", len(wire), raw)
+	}
+	if wire[0]["type"] != "function_call_output" || wire[0]["call_id"] != "call_1" {
+		t.Errorf("output item = %v", wire[0])
+	}
+	if output, _ := wire[0]["output"].(string); output == "" {
+		t.Errorf("image-only tool result produced empty output text")
+	}
+	content, _ := wire[1]["content"].([]any)
+	if wire[1]["role"] != "user" || len(content) != 2 {
+		t.Fatalf("follow-up = %v, want user message with 2 parts", wire[1])
+	}
+	imagePart, _ := content[1].(map[string]any)
+	if imagePart["type"] != "input_image" || imagePart["image_url"] != "data:image/png;base64,BBBB" {
+		t.Errorf("image part = %v", imagePart)
+	}
+}

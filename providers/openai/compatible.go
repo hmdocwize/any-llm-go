@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"strings"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -539,10 +540,16 @@ func convertMessage(msg providers.Message) (openai.ChatCompletionMessageParamUni
 	}
 }
 
-// convertMessages converts provider messages to OpenAI format.
+// convertMessages converts provider messages to OpenAI format. Tool messages
+// carrying content parts expand to multiple wire messages (see
+// convertMultiModalToolMessage), so the output may be longer than the input.
 func convertMessages(messages []providers.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	result := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
 	for _, msg := range messages {
+		if msg.Role == providers.RoleTool && msg.IsMultiModal() {
+			result = append(result, convertMultiModalToolMessage(msg)...)
+			continue
+		}
 		converted, err := convertMessage(msg)
 		if err != nil {
 			return nil, err
@@ -550,6 +557,62 @@ func convertMessages(messages []providers.Message) ([]openai.ChatCompletionMessa
 		result = append(result, converted)
 	}
 	return result, nil
+}
+
+// convertMultiModalToolMessage converts a tool message whose content is a
+// []ContentPart. The Chat Completions API accepts only text in tool messages,
+// so the text parts become the tool message body and any image parts are
+// re-attached as an immediately following user message that references the
+// tool call — vision models read it like a user-provided screenshot of the
+// tool output. (The Responses API has the same text-only constraint; see
+// convertResponsesInput.)
+func convertMultiModalToolMessage(msg providers.Message) []openai.ChatCompletionMessageParamUnion {
+	text, images := splitToolResultParts(msg)
+	result := []openai.ChatCompletionMessageParamUnion{openai.ToolMessage(text, msg.ToolCallID)}
+	if len(images) == 0 {
+		return result
+	}
+
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(images)+1)
+	parts = append(parts, openai.TextContentPart(toolImageHeader(msg.ToolCallID, len(images))))
+	for _, image := range images {
+		parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+			URL: image.ImageURL.URL,
+		}))
+	}
+	return append(result, openai.UserMessage(parts))
+}
+
+// splitToolResultParts separates a multimodal tool result into its joined
+// text and its image parts. When the result is image-only, a short text
+// placeholder keeps the tool message non-empty (both OpenAI APIs require
+// tool output text).
+func splitToolResultParts(msg providers.Message) (string, []providers.ContentPart) {
+	var textParts []string
+	var images []providers.ContentPart
+	for _, part := range msg.ContentParts() {
+		switch part.Type {
+		case contentTypeText:
+			if part.Text != "" {
+				textParts = append(textParts, part.Text)
+			}
+		case contentTypeImageURL:
+			if part.ImageURL != nil {
+				images = append(images, part)
+			}
+		}
+	}
+	text := strings.Join(textParts, "\n")
+	if text == "" && len(images) > 0 {
+		text = fmt.Sprintf("[%d image(s) returned; attached in the following user message]", len(images))
+	}
+	return text, images
+}
+
+// toolImageHeader is the text part that precedes re-attached tool images so
+// the model can associate them with the originating tool call.
+func toolImageHeader(toolCallID string, imageCount int) string {
+	return fmt.Sprintf("[%d image(s) output by tool call %s]", imageCount, toolCallID)
 }
 
 // convertParams converts providers.CompletionParams to OpenAI request parameters.

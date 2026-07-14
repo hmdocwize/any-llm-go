@@ -264,11 +264,46 @@ func convertResponsesInput(messages []providers.Message) responses.ResponseInput
 			}
 
 		case providers.RoleTool:
-			items = append(items, responses.ResponseInputItemParamOfFunctionCallOutput(
-				msg.ToolCallID, msg.ContentString()))
+			if msg.IsMultiModal() {
+				items = append(items, convertResponsesMultiModalToolResult(msg)...)
+			} else {
+				items = append(items, responses.ResponseInputItemParamOfFunctionCallOutput(
+					msg.ToolCallID, msg.ContentString()))
+			}
 		}
 	}
 	return items
+}
+
+// convertResponsesMultiModalToolResult converts a tool message whose content
+// is a []ContentPart. Responses API function_call_output accepts only string
+// output, so text parts form the output and image parts are re-attached as an
+// immediately following user message referencing the tool call — the same
+// strategy as convertMultiModalToolMessage on the Chat Completions path.
+func convertResponsesMultiModalToolResult(msg providers.Message) responses.ResponseInputParam {
+	text, images := splitToolResultParts(msg)
+	items := responses.ResponseInputParam{
+		responses.ResponseInputItemParamOfFunctionCallOutput(msg.ToolCallID, text),
+	}
+	if len(images) == 0 {
+		return items
+	}
+
+	content := responses.ResponseInputMessageContentListParam{
+		responses.ResponseInputContentUnionParam{
+			OfInputText: &responses.ResponseInputTextParam{Text: toolImageHeader(msg.ToolCallID, len(images))},
+		},
+	}
+	for _, image := range images {
+		content = append(content, responses.ResponseInputContentUnionParam{
+			OfInputImage: &responses.ResponseInputImageParam{
+				ImageURL: openai.String(image.ImageURL.URL),
+				Detail:   responses.ResponseInputImageDetailAuto,
+			},
+		})
+	}
+	return append(items, responses.ResponseInputItemParamOfInputMessage(
+		content, string(responses.EasyInputMessageRoleUser)))
 }
 
 // convertResponsesContentParts converts multi-modal content parts to
