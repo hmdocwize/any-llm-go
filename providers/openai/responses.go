@@ -206,6 +206,13 @@ func convertResponsesParams(params providers.CompletionParams) responses.Respons
 		req.User = openai.String(params.User)
 	}
 
+	// prompt_cache_key: routing hint for OpenAI automatic prompt caching, same as
+	// the Chat Completions path (convertParams). ResponseNewParams.PromptCacheKey
+	// is also param.Opt[string]. Only emitted when a caller supplied one via Extra.
+	if key := promptCacheKeyFromExtra(params.Extra); key != "" {
+		req.PromptCacheKey = openai.String(key)
+	}
+
 	// "auto" is not a Responses API effort level — omit it and let the
 	// server apply the model's default. "none"/"" never reach this path
 	// (shouldUseResponsesAPI), but tolerate them the same way.

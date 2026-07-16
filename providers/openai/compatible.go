@@ -632,6 +632,21 @@ func toolImageHeader(toolCallID string, imageCount int) string {
 	return fmt.Sprintf("[%d image(s) output by tool call %s]", imageCount, toolCallID)
 }
 
+// extraKeyOpenAIPromptCacheKey is the CompletionParams.Extra key carrying an
+// OpenAI prompt_cache_key routing hint: a stable string that pins requests
+// sharing a long common prefix to the same cache machine, improving automatic
+// prompt-cache hit rate (developers.openai.com/api/docs/guides/prompt-caching).
+// Extra is json:"-" / in-memory only, so callers set it per request; empty or
+// absent ⇒ the field is omitted and OpenAI falls back to its default prefix hash.
+const extraKeyOpenAIPromptCacheKey = "openai_prompt_cache_key"
+
+// promptCacheKeyFromExtra extracts the OpenAI prompt_cache_key from Extra,
+// returning "" when absent or not a string. Reading a nil map is safe in Go.
+func promptCacheKeyFromExtra(extra map[string]any) string {
+	key, _ := extra[extraKeyOpenAIPromptCacheKey].(string)
+	return key
+}
+
 // convertParams converts providers.CompletionParams to OpenAI request parameters.
 func convertParams(params providers.CompletionParams) openai.ChatCompletionNewParams {
 	messages, _ := convertMessages(params.Messages) // Error already checked in validateCompletionParams
@@ -681,6 +696,13 @@ func convertParams(params providers.CompletionParams) openai.ChatCompletionNewPa
 
 	if params.User != "" {
 		req.User = openai.String(params.User)
+	}
+
+	// prompt_cache_key: routing hint for OpenAI automatic prompt caching. Mirrors
+	// the User line above (both are param.Opt[string]). Only emitted when a caller
+	// supplied one via Extra, so the OFF path is unchanged.
+	if key := promptCacheKeyFromExtra(params.Extra); key != "" {
+		req.PromptCacheKey = openai.String(key)
 	}
 
 	if params.ReasoningEffort != "" && params.ReasoningEffort != providers.ReasoningEffortNone {
