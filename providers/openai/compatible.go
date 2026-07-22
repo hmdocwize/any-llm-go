@@ -647,6 +647,23 @@ func promptCacheKeyFromExtra(extra map[string]any) string {
 	return key
 }
 
+// extraKeyReasoningSummary is the CompletionParams.Extra key carrying the
+// reasoning-summary opt-in for the Responses API. Value "auto" ⇒ request the
+// model's reasoning summary (reasoning.summary=auto); empty or absent ⇒ omit it.
+// Reasoning summaries add latency/tokens, so they are opt-in, NOT the default:
+// the caller sets this per request only when the summary is actually wanted.
+// Extra is json:"-" / in-memory only. Read solely on the Responses path
+// (convertResponsesParams); the chat-completions path ignores it, so models that
+// stream reasoning natively there are unaffected.
+const extraKeyReasoningSummary = "reasoning_summary"
+
+// reasoningSummaryFromExtra extracts the reasoning-summary opt-in from Extra,
+// returning "" when absent or not a string. Reading a nil map is safe in Go.
+func reasoningSummaryFromExtra(extra map[string]any) string {
+	summary, _ := extra[extraKeyReasoningSummary].(string)
+	return summary
+}
+
 // convertParams converts providers.CompletionParams to OpenAI request parameters.
 func convertParams(params providers.CompletionParams) openai.ChatCompletionNewParams {
 	messages, _ := convertMessages(params.Messages) // Error already checked in validateCompletionParams

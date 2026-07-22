@@ -61,6 +61,9 @@ func TestConvertResponsesParamsWire(t *testing.T) {
 		},
 		MaxTokens:       intPtr(128000),
 		ReasoningEffort: providers.ReasoningEffortHigh,
+		// Opt in to the reasoning summary (now off by default) so this wire test
+		// still exercises the summary=auto field. See the summary-gate test below.
+		Extra: map[string]any{"reasoning_summary": "auto"},
 		Tools: []providers.Tool{{Type: "function", Function: providers.Function{
 			Name:        "get_weather",
 			Description: "Get weather",
@@ -143,6 +146,44 @@ func TestConvertResponsesParamsAutoEffortOmitted(t *testing.T) {
 	}
 	if _, present := wire["reasoning"]; present {
 		t.Errorf("reasoning block present for auto effort: %s", raw)
+	}
+}
+
+// TestConvertResponsesParamsReasoningSummaryGate verifies the reasoning summary
+// is opt-in: absent from the request unless Extra["reasoning_summary"]="auto",
+// while the reasoning effort is applied either way (the model still reasons).
+func TestConvertResponsesParamsReasoningSummaryGate(t *testing.T) {
+	reasoningOf := func(extra map[string]any) map[string]any {
+		raw, err := json.Marshal(convertResponsesParams(providers.CompletionParams{
+			Model:           "gpt-5.6-luna",
+			Messages:        []providers.Message{{Role: providers.RoleUser, Content: "hi"}},
+			ReasoningEffort: providers.ReasoningEffortHigh,
+			Extra:           extra,
+		}))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		reasoning, _ := wire["reasoning"].(map[string]any)
+		return reasoning
+	}
+
+	// No opt-in → effort present, summary omitted.
+	off := reasoningOf(nil)
+	if off["effort"] != "high" {
+		t.Errorf("default: effort = %v, want high", off["effort"])
+	}
+	if _, present := off["summary"]; present {
+		t.Errorf("default: summary present, want omitted (opt-in only): %v", off)
+	}
+
+	// Opt-in → summary=auto alongside the effort.
+	on := reasoningOf(map[string]any{"reasoning_summary": "auto"})
+	if on["effort"] != "high" || on["summary"] != "auto" {
+		t.Errorf("opted-in: reasoning = %v, want effort=high summary=auto", on)
 	}
 }
 

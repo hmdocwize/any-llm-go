@@ -219,12 +219,19 @@ func convertResponsesParams(params providers.CompletionParams) responses.Respons
 	switch params.ReasoningEffort {
 	case "", providers.ReasoningEffortAuto, providers.ReasoningEffortNone:
 	default:
-		req.Reasoning = shared.ReasoningParam{
+		reasoning := shared.ReasoningParam{
 			Effort: shared.ReasoningEffort(params.ReasoningEffort),
-			// Reasoning summaries are the only reasoning trace the Responses
-			// API exposes; requesting them feeds ChunkDelta.Reasoning.
-			Summary: shared.ReasoningSummaryAuto,
 		}
+		// Reasoning summaries are the only reasoning trace the Responses API
+		// exposes; requesting them feeds ChunkDelta.Reasoning. They add
+		// latency/tokens, so they are OPT-IN, not the default: only request the
+		// summary when the caller sets Extra["reasoning_summary"]="auto". Absent
+		// ⇒ effort is still applied (the model still reasons) but no summary is
+		// emitted. See extraKeyReasoningSummary.
+		if reasoningSummaryFromExtra(params.Extra) == "auto" {
+			reasoning.Summary = shared.ReasoningSummaryAuto
+		}
+		req.Reasoning = reasoning
 	}
 
 	if len(params.Tools) > 0 {
