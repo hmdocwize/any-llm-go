@@ -28,7 +28,8 @@ const (
 )
 
 // Default thinking budgets for reasoning effort levels.
-// These match the Python any-llm library.
+// These match the Python any-llm library. Gemini has no native tier above
+// high, so xhigh and max intentionally saturate at the high budget.
 const (
 	thinkingBudgetHigh   int32 = 24576
 	thinkingBudgetLow    int32 = 1024
@@ -959,6 +960,8 @@ func thinkingBudget(effort providers.ReasoningEffort) (int32, bool) {
 	case providers.ReasoningEffortMedium:
 		return thinkingBudgetMedium, true
 	case providers.ReasoningEffortHigh:
+		return thinkingBudgetHigh, true
+	case providers.ReasoningEffortXHigh, providers.ReasoningEffortMax:
 		return thinkingBudgetHigh, true
 	default:
 		return 0, false

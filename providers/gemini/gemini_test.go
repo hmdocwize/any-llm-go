@@ -553,6 +553,18 @@ func TestThinkingBudget(t *testing.T) {
 			ok:       true,
 		},
 		{
+			name:     "xhigh effort saturates at high",
+			effort:   providers.ReasoningEffortXHigh,
+			expected: thinkingBudgetHigh,
+			ok:       true,
+		},
+		{
+			name:     "max effort saturates at high",
+			effort:   providers.ReasoningEffortMax,
+			expected: thinkingBudgetHigh,
+			ok:       true,
+		},
+		{
 			name:     "none effort",
 			effort:   providers.ReasoningEffortNone,
 			expected: 0,

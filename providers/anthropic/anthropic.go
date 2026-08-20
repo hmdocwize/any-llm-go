@@ -708,6 +708,10 @@ func thinkingBudget(effort providers.ReasoningEffort) (int64, bool) {
 		return 4096, true
 	case providers.ReasoningEffortHigh:
 		return 16384, true
+	case providers.ReasoningEffortXHigh:
+		return 24576, true
+	case providers.ReasoningEffortMax:
+		return 31744, true
 	default:
 		return 0, false
 	}

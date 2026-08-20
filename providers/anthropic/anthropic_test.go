@@ -709,6 +709,18 @@ func TestThinkingBudget(t *testing.T) {
 			ok:       true,
 		},
 		{
+			name:     "xhigh effort",
+			effort:   providers.ReasoningEffortXHigh,
+			expected: 24576,
+			ok:       true,
+		},
+		{
+			name:     "max effort",
+			effort:   providers.ReasoningEffortMax,
+			expected: 31744,
+			ok:       true,
+		},
+		{
 			name:     "none effort",
 			effort:   providers.ReasoningEffortNone,
 			expected: 0,

@@ -2,4 +2,4 @@
 package sdk
 
 // Version is the library version string.
-const Version = "v0.9.1-reasoning7"
+const Version = "v0.9.1-reasoning8"
