@@ -88,3 +88,35 @@ func TestToolCallExtraExcludedFromJSON(t *testing.T) {
 	require.Equal(t, "call_123", decoded["id"])
 	require.Equal(t, "function", decoded["type"])
 }
+
+func TestReasoningExtraExcludedFromJSON(t *testing.T) {
+	t.Parallel()
+
+	msg := Message{
+		Role:    "assistant",
+		Content: "",
+		Reasoning: &Reasoning{
+			Content: "thinking...",
+			Extra: map[string]ProviderData{
+				"anthropic": {"signature": "sig123"},
+			},
+		},
+	}
+
+	b, err := json.Marshal(msg)
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	err = json.Unmarshal(b, &decoded)
+	require.NoError(t, err)
+
+	reasoning, ok := decoded["reasoning"].(map[string]any)
+	require.True(t, ok, "reasoning field must be present")
+
+	// Extra must not appear in JSON output.
+	_, hasExtra := reasoning["extra"]
+	require.False(t, hasExtra, "Reasoning.Extra must be excluded from JSON serialization")
+
+	// The visible content must still round-trip.
+	require.Equal(t, "thinking...", reasoning["content"])
+}

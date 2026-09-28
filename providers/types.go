@@ -322,6 +322,18 @@ type ModelsResponse struct {
 // Reasoning represents extended thinking/reasoning content.
 type Reasoning struct {
 	Content string `json:"content,omitempty"`
+
+	// Extra holds provider-specific metadata for round-tripping a reasoning
+	// block across multi-turn conversations — the same role Extra plays on
+	// ToolCall, and for the same reason: a provider that binds a reasoning
+	// block to an opaque, must-echo-verbatim value (Anthropic's thinking-block
+	// `signature` / `redacted_thinking`'s `data`; Gemini's function-call
+	// ThoughtSignature lives on ToolCall.Extra instead, since Gemini attaches
+	// it per call rather than per message) has nowhere else to carry that
+	// value between the response that produced it and the request that
+	// replays it. Keyed by provider name (e.g. "anthropic"). Excluded from
+	// JSON; callers preserve this through their own storage.
+	Extra map[string]ProviderData `json:"-"`
 }
 
 // ResponseFormat specifies the format of the response.

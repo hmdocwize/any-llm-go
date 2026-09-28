@@ -114,6 +114,7 @@ type (
 type (
 	Function           = providers.Function
 	FunctionCall       = providers.FunctionCall
+	ProviderData       = providers.ProviderData
 	Tool               = providers.Tool
 	ToolCall           = providers.ToolCall
 	ToolChoice         = providers.ToolChoice
