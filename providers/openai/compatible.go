@@ -257,7 +257,10 @@ func (p *CompatibleProvider) CompletionStream(
 // chat-completions request without an explicit "none" is rejected outright —
 // so on the OpenAI platform (same config gate as the Responses API routing)
 // the "none" must actually reach the wire.
-func (p *CompatibleProvider) applyExplicitNoneEffort(req *openai.ChatCompletionNewParams, params providers.CompletionParams) {
+func (p *CompatibleProvider) applyExplicitNoneEffort(
+	req *openai.ChatCompletionNewParams,
+	params providers.CompletionParams,
+) {
 	if p.compatibleConfig.UseResponsesAPIForReasoningTools &&
 		len(params.Tools) > 0 &&
 		params.ReasoningEffort == providers.ReasoningEffortNone {

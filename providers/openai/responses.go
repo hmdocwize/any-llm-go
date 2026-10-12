@@ -144,7 +144,11 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 					Arguments: event.Item.Arguments,
 				},
 			}
-			if !emit(providers.ChunkDelta{Role: providers.RoleAssistant, ToolCalls: []providers.ToolCall{toolCall}}, "", nil) {
+			if !emit(
+				providers.ChunkDelta{Role: providers.RoleAssistant, ToolCalls: []providers.ToolCall{toolCall}},
+				"",
+				nil,
+			) {
 				return
 			}
 

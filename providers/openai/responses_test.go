@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/mozilla-ai/any-llm-go/providers"
 	"github.com/openai/openai-go/responses"
+
+	"github.com/mozilla-ai/any-llm-go/providers"
 )
 
 func float64Ptr(v float64) *float64 { return &v }
@@ -22,12 +23,37 @@ func TestShouldUseResponsesAPI(t *testing.T) {
 		params  providers.CompletionParams
 		want    bool
 	}{
-		{"tools + high effort", true, providers.CompletionParams{Tools: tools, ReasoningEffort: providers.ReasoningEffortHigh}, true},
-		{"tools + medium effort", true, providers.CompletionParams{Tools: tools, ReasoningEffort: providers.ReasoningEffortMedium}, true},
-		{"tools + none effort", true, providers.CompletionParams{Tools: tools, ReasoningEffort: providers.ReasoningEffortNone}, false},
+		{
+			"tools + high effort",
+			true,
+			providers.CompletionParams{Tools: tools, ReasoningEffort: providers.ReasoningEffortHigh},
+			true,
+		},
+		{
+			"tools + medium effort",
+			true,
+			providers.CompletionParams{Tools: tools, ReasoningEffort: providers.ReasoningEffortMedium},
+			true,
+		},
+		{
+			"tools + none effort",
+			true,
+			providers.CompletionParams{Tools: tools, ReasoningEffort: providers.ReasoningEffortNone},
+			false,
+		},
 		{"tools + no effort", true, providers.CompletionParams{Tools: tools}, false},
-		{"no tools + high effort", true, providers.CompletionParams{ReasoningEffort: providers.ReasoningEffortHigh}, false},
-		{"disabled (compatible endpoint)", false, providers.CompletionParams{Tools: tools, ReasoningEffort: providers.ReasoningEffortHigh}, false},
+		{
+			"no tools + high effort",
+			true,
+			providers.CompletionParams{ReasoningEffort: providers.ReasoningEffortHigh},
+			false,
+		},
+		{
+			"disabled (compatible endpoint)",
+			false,
+			providers.CompletionParams{Tools: tools, ReasoningEffort: providers.ReasoningEffortHigh},
+			false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,13 +248,20 @@ func TestConvertResponsesResponse(t *testing.T) {
 		t.Fatalf("tool calls = %d, want 1", len(choice.Message.ToolCalls))
 	}
 	toolCall := choice.Message.ToolCalls[0]
-	if toolCall.ID != "call_9" || toolCall.Function.Name != "get_weather" || toolCall.Function.Arguments != `{"city":"Paris"}` {
+	if toolCall.ID != "call_9" || toolCall.Function.Name != "get_weather" ||
+		toolCall.Function.Arguments != `{"city":"Paris"}` {
 		t.Errorf("tool call = %+v", toolCall)
 	}
 	if got.Usage == nil {
 		t.Fatal("usage dropped")
 	}
-	want := providers.Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, ReasoningTokens: 30, CachedPromptTokens: 60}
+	want := providers.Usage{
+		PromptTokens:       100,
+		CompletionTokens:   50,
+		TotalTokens:        150,
+		ReasoningTokens:    30,
+		CachedPromptTokens: 60,
+	}
 	if *got.Usage != want {
 		t.Errorf("usage = %+v, want %+v", *got.Usage, want)
 	}
