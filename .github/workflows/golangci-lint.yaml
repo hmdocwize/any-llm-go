@@ -1,0 +1,33 @@
+name: Lint (Go)
+
+# Dedicated golangci-lint workflow, mirroring hmdocwize/portal's golangci-lint.yml.
+# Runs on the org's self-hosted ARC pool, targeted by shared labels rather than an
+# ephemeral runner name. Lint rules live in .golangci.yaml at the repo root.
+# This replaces the `lint` job that previously lived in ci.yaml (removed there so
+# golangci-lint does not run twice per push/PR).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  golangci:
+    name: golangci-lint
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2

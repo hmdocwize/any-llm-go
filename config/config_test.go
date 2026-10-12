@@ -2,6 +2,7 @@ package config
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -571,4 +572,179 @@ func TestHTTPClientCaching(t *testing.T) {
 	client2 := cfg.HTTPClient()
 
 	require.Same(t, client1, client2)
+}
+
+func TestWithHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		key     string
+		value   string
+		wantKey string
+		wantErr bool
+	}{
+		{
+			name:    "valid header",
+			key:     "cf-aig-authorization",
+			value:   "Bearer token123",
+			wantKey: "cf-aig-authorization",
+			wantErr: false,
+		},
+		{
+			name:    "key with whitespace trimmed",
+			key:     "  X-Custom-Header  ",
+			value:   "value",
+			wantKey: "X-Custom-Header",
+			wantErr: false,
+		},
+		{
+			name:    "empty key",
+			key:     "",
+			value:   "value",
+			wantErr: true,
+		},
+		{
+			name:    "whitespace only key",
+			key:     "   ",
+			value:   "value",
+			wantErr: true,
+		},
+		{
+			name:    "empty value is allowed",
+			key:     "X-Header",
+			value:   "",
+			wantKey: "X-Header",
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := New(WithHeader(tc.key, tc.value))
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, cfg.Headers)
+			require.Equal(t, tc.value, cfg.Headers.Get(tc.wantKey))
+		})
+	}
+}
+
+func TestWithHeader_Multiple(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := New(
+		WithHeader("cf-aig-authorization", "Bearer token1"),
+		WithHeader("X-Custom", "value2"),
+	)
+	require.NoError(t, err)
+	require.Len(t, cfg.Headers, 2)
+	require.Equal(t, "Bearer token1", cfg.Headers.Get("cf-aig-authorization"))
+	require.Equal(t, "value2", cfg.Headers.Get("X-Custom"))
+}
+
+func TestWithHeader_DuplicateKeyOverwrites(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := New(
+		WithHeader("X-Token", "first"),
+		WithHeader("X-Token", "second"),
+	)
+	require.NoError(t, err)
+
+	// WithHeader uses Set semantics: the later value replaces the earlier one
+	// rather than appending a second value.
+	require.Len(t, cfg.Headers, 1)
+	require.Equal(t, "second", cfg.Headers.Get("X-Token"))
+	require.Equal(t, []string{"second"}, cfg.Headers.Values("X-Token"))
+}
+
+func TestHTTPClient_WithHeaders(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := New(
+		WithHeader("cf-aig-authorization", "Bearer mytoken"),
+		WithHeader("X-Custom", "value"),
+	)
+	require.NoError(t, err)
+
+	client := cfg.HTTPClient()
+	require.NotNil(t, client)
+
+	// The transport should be a headerTransport.
+	ht, ok := client.Transport.(*headerTransport)
+	require.True(t, ok, "expected headerTransport, got %T", client.Transport)
+	require.Equal(t, "Bearer mytoken", ht.headers.Get("cf-aig-authorization"))
+	require.Equal(t, "value", ht.headers.Get("X-Custom"))
+}
+
+func TestHTTPClient_WithHeaders_CustomClient(t *testing.T) {
+	t.Parallel()
+
+	customClient := &http.Client{Timeout: 5 * time.Second}
+	cfg, err := New(
+		WithHTTPClient(customClient),
+		WithHeader("cf-aig-authorization", "Bearer token"),
+	)
+	require.NoError(t, err)
+
+	client := cfg.HTTPClient()
+	require.NotNil(t, client)
+
+	// Should wrap the custom client's transport.
+	ht, ok := client.Transport.(*headerTransport)
+	require.True(t, ok, "expected headerTransport wrapping custom client")
+	require.Equal(t, "Bearer token", ht.headers.Get("cf-aig-authorization"))
+	require.Equal(t, 5*time.Second, client.Timeout)
+}
+
+func TestHTTPClient_NoHeaders_NoWrapping(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := New()
+	require.NoError(t, err)
+
+	client := cfg.HTTPClient()
+	require.NotNil(t, client)
+
+	// Without headers, the client is left unwrapped and carries no custom transport.
+	require.Nil(t, client.Transport)
+}
+
+func TestHTTPClient_Headers_EndToEnd(t *testing.T) {
+	t.Parallel()
+
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg, err := New(
+		WithHeader("cf-aig-authorization", "Bearer e2e-token"),
+		WithHeader("X-Custom", "custom-value"),
+	)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := cfg.HTTPClient().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "Bearer e2e-token", got.Get("cf-aig-authorization"))
+	require.Equal(t, "custom-value", got.Get("X-Custom"))
+
+	// RoundTrip must not mutate the caller's request (net/http contract).
+	require.Empty(t, req.Header.Get("cf-aig-authorization"))
+	require.Empty(t, req.Header.Get("X-Custom"))
 }
