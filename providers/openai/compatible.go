@@ -7,12 +7,13 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"os"
 	"strings"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/packages/respjson"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/respjson"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/mozilla-ai/any-llm-go/config"
 	"github.com/mozilla-ai/any-llm-go/errors"
@@ -28,6 +29,10 @@ const (
 	apiCodeModelNotFound         = "model_not_found"
 	apiCodeRateLimitExceeded     = "rate_limit_exceeded"
 )
+
+// envSDKCustomHeaders is the environment variable that openai-go v3 reads in
+// DefaultClientOptions to inject arbitrary headers into every request.
+const envSDKCustomHeaders = "OPENAI_CUSTOM_HEADERS"
 
 // Object type constants.
 const (
@@ -160,6 +165,8 @@ func NewCompatible(compatCfg CompatibleConfig, opts ...config.Option) (*Compatib
 	if baseURL != "" {
 		clientOpts = append(clientOpts, option.WithBaseURL(baseURL))
 	}
+
+	clientOpts = append(clientOpts, sdkEnvHeaderDeletions()...)
 
 	return &CompatibleProvider{
 		compatibleConfig: compatCfg,
@@ -334,46 +341,52 @@ func (p *CompatibleProvider) Name() string {
 
 // convertAPIError converts an OpenAI API error to a unified error type.
 func convertAPIError(name string, apiErr *openai.Error, originalErr error) error {
+	// openai-go v3 reduces Error() to a status summary; restore the server's
+	// message and code so callers and logs can see why the request failed.
+	cause := withAPIErrorDetail(apiErr, originalErr)
+
 	switch apiErr.StatusCode {
 	case 400:
 		if apiErr.Code == apiCodeContextLengthExceeded {
-			return errors.NewContextLengthError(name, originalErr)
+			return errors.NewContextLengthError(name, cause)
 		}
 		if apiErr.Code == apiCodeContentFilter || apiErr.Code == apiCodeContentPolicyViolated {
-			return errors.NewContentFilterError(name, originalErr)
+			return errors.NewContentFilterError(name, cause)
 		}
-		return errors.NewInvalidRequestError(name, originalErr)
+		return errors.NewInvalidRequestError(name, cause)
 	case 401:
-		return errors.NewAuthenticationError(name, originalErr)
+		return errors.NewAuthenticationError(name, cause)
 	case 404:
-		return errors.NewModelNotFoundError(name, originalErr)
+		return errors.NewModelNotFoundError(name, cause)
 	case 429:
-		return errors.NewRateLimitError(name, originalErr)
+		return errors.NewRateLimitError(name, cause)
 	}
 
 	// Check error code for additional classification.
 	switch apiErr.Code {
 	case apiCodeInvalidAPIKey:
-		return errors.NewAuthenticationError(name, originalErr)
+		return errors.NewAuthenticationError(name, cause)
 	case apiCodeModelNotFound:
-		return errors.NewModelNotFoundError(name, originalErr)
+		return errors.NewModelNotFoundError(name, cause)
 	case apiCodeRateLimitExceeded:
-		return errors.NewRateLimitError(name, originalErr)
+		return errors.NewRateLimitError(name, cause)
 	}
 
-	return errors.NewProviderError(name, originalErr)
+	return errors.NewProviderError(name, cause)
 }
 
 // convertAssistantMessage converts an assistant message to OpenAI format.
 func convertAssistantMessage(msg providers.Message) openai.ChatCompletionMessageParamUnion {
 	if len(msg.ToolCalls) > 0 {
-		toolCalls := make([]openai.ChatCompletionMessageToolCallParam, 0, len(msg.ToolCalls))
+		toolCalls := make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(msg.ToolCalls))
 		for _, tc := range msg.ToolCalls {
-			toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallParam{
-				ID: tc.ID,
-				Function: openai.ChatCompletionMessageToolCallFunctionParam{
-					Name:      tc.Function.Name,
-					Arguments: tc.Function.Arguments,
+			toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+					ID: tc.ID,
+					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
 				},
 			})
 		}
@@ -432,12 +445,15 @@ func convertChunk(chunk *openai.ChatCompletionChunk) providers.ChatCompletionChu
 	}
 
 	result := providers.ChatCompletionChunk{
-		ID:                chunk.ID,
-		Object:            objectChatCompletionChunk,
-		Created:           chunk.Created,
-		Model:             chunk.Model,
-		Choices:           choices,
-		SystemFingerprint: chunk.SystemFingerprint,
+		ID:      chunk.ID,
+		Object:  objectChatCompletionChunk,
+		Created: chunk.Created,
+		Model:   chunk.Model,
+		Choices: choices,
+		// Deprecated upstream in openai-go v3 but still populated by OpenAI and
+		// OpenAI-compatible endpoints; forwarded unchanged to keep the
+		// normalized output stable.
+		SystemFingerprint: chunk.SystemFingerprint, //nolint:staticcheck // SA1019: see above.
 	}
 
 	if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
@@ -750,12 +766,13 @@ func convertResponse(resp *openai.ChatCompletion) *providers.ChatCompletion {
 	}
 
 	result := &providers.ChatCompletion{
-		ID:                resp.ID,
-		Object:            objectChatCompletion,
-		Created:           resp.Created,
-		Model:             resp.Model,
-		Choices:           choices,
-		SystemFingerprint: resp.SystemFingerprint,
+		ID:      resp.ID,
+		Object:  objectChatCompletion,
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: choices,
+		// Deprecated upstream in openai-go v3; forwarded unchanged (see convertChunk).
+		SystemFingerprint: resp.SystemFingerprint, //nolint:staticcheck // SA1019: see above.
 	}
 
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
@@ -838,7 +855,7 @@ func convertToolChoice(choice any) openai.ChatCompletionToolChoiceOptionUnionPar
 		}
 	case providers.ToolChoice:
 		if v.Function != nil {
-			return openai.ChatCompletionToolChoiceOptionParamOfChatCompletionNamedToolChoice(
+			return openai.ToolChoiceOptionFunctionToolChoice(
 				openai.ChatCompletionNamedToolChoiceFunctionParam{
 					Name: v.Function.Name,
 				},
@@ -851,16 +868,14 @@ func convertToolChoice(choice any) openai.ChatCompletionToolChoiceOptionUnionPar
 }
 
 // convertTools converts provider tools to OpenAI format.
-func convertTools(tools []providers.Tool) []openai.ChatCompletionToolParam {
-	result := make([]openai.ChatCompletionToolParam, 0, len(tools))
+func convertTools(tools []providers.Tool) []openai.ChatCompletionToolUnionParam {
+	result := make([]openai.ChatCompletionToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		result = append(result, openai.ChatCompletionToolParam{
-			Function: openai.FunctionDefinitionParam{
-				Name:        tool.Function.Name,
-				Description: openai.String(tool.Function.Description),
-				Parameters:  openai.FunctionParameters(tool.Function.Parameters),
-			},
-		})
+		result = append(result, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+			Name:        tool.Function.Name,
+			Description: openai.String(tool.Function.Description),
+			Parameters:  openai.FunctionParameters(tool.Function.Parameters),
+		}))
 	}
 	return result
 }
@@ -894,6 +909,31 @@ func resolveAPIKey(cfg *config.Config, compatCfg CompatibleConfig) string {
 	return cfg.APIKey
 }
 
+// sdkEnvHeaderDeletions returns options that remove headers openai-go injects
+// from OPENAI_CUSTOM_HEADERS. The SDK reads that variable unconditionally, which
+// would forward its values to every OpenAI-compatible backend (including
+// third-party hosts). Parsing mirrors the SDK: one "Name: value" per line.
+// Headers set via config.WithHeader are applied at the transport layer and are
+// unaffected.
+func sdkEnvHeaderDeletions() []option.RequestOption {
+	raw, ok := os.LookupEnv(envSDKCustomHeaders)
+	if !ok {
+		return nil
+	}
+
+	lines := strings.Split(raw, "\n")
+	opts := make([]option.RequestOption, 0, len(lines))
+	for _, line := range lines {
+		name, _, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		opts = append(opts, option.WithHeaderDel(strings.TrimSpace(name)))
+	}
+
+	return opts
+}
+
 // validateCompatibleConfig validates the compatible provider configuration.
 func validateCompatibleConfig(cfg CompatibleConfig) error {
 	if cfg.Name == "" {
@@ -919,4 +959,31 @@ func validateCompletionParams(params providers.CompletionParams) error {
 	}
 
 	return nil
+}
+
+// withAPIErrorDetail wraps originalErr with the structured message, code and
+// type parsed from the API error body. The wrapped error remains reachable via
+// errors.As/errors.Is. Request URLs and raw bodies are deliberately omitted.
+func withAPIErrorDetail(apiErr *openai.Error, originalErr error) error {
+	attrs := make([]string, 0, 2)
+	if apiErr.Code != "" {
+		attrs = append(attrs, "code="+apiErr.Code)
+	}
+	if apiErr.Type != "" {
+		attrs = append(attrs, "type="+apiErr.Type)
+	}
+
+	parts := make([]string, 0, 2)
+	if apiErr.Message != "" {
+		parts = append(parts, apiErr.Message)
+	}
+	if len(attrs) > 0 {
+		parts = append(parts, "("+strings.Join(attrs, ", ")+")")
+	}
+
+	if len(parts) == 0 {
+		return originalErr
+	}
+
+	return fmt.Errorf("%w: %s", originalErr, strings.Join(parts, " "))
 }

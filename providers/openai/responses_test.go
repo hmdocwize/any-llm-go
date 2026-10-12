@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3/responses"
 
 	"github.com/mozilla-ai/any-llm-go/providers"
 )

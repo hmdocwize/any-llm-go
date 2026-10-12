@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 // TestConvertChunkSurfacesReasoningContent verifies the fork patch: a streamed

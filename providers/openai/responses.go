@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/packages/param"
-	"github.com/openai/openai-go/responses"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/mozilla-ai/any-llm-go/errors"
 	"github.com/mozilla-ai/any-llm-go/providers"
@@ -116,18 +116,18 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 			created = int64(event.Response.CreatedAt)
 
 		case streamEventOutputTextDelta:
-			if event.Delta.OfString == "" {
+			if event.Delta == "" {
 				continue
 			}
-			if !emit(providers.ChunkDelta{Role: providers.RoleAssistant, Content: event.Delta.OfString}, "", nil) {
+			if !emit(providers.ChunkDelta{Role: providers.RoleAssistant, Content: event.Delta}, "", nil) {
 				return
 			}
 
 		case streamEventReasoningSummaryDelta:
-			if event.Delta.OfString == "" {
+			if event.Delta == "" {
 				continue
 			}
-			if !emit(providers.ChunkDelta{Reasoning: &providers.Reasoning{Content: event.Delta.OfString}}, "", nil) {
+			if !emit(providers.ChunkDelta{Reasoning: &providers.Reasoning{Content: event.Delta}}, "", nil) {
 				return
 			}
 
@@ -141,7 +141,7 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 				Type: "function",
 				Function: providers.FunctionCall{
 					Name:      event.Item.Name,
-					Arguments: event.Item.Arguments,
+					Arguments: event.Item.Arguments.OfString,
 				},
 			}
 			if !emit(
@@ -285,8 +285,7 @@ func convertResponsesInput(messages []providers.Message) responses.ResponseInput
 			if msg.IsMultiModal() {
 				items = append(items, convertResponsesMultiModalToolResult(msg)...)
 			} else {
-				items = append(items, responses.ResponseInputItemParamOfFunctionCallOutput(
-					msg.ToolCallID, msg.ContentString()))
+				items = append(items, responsesFunctionCallOutput(msg.ToolCallID, msg.ContentString()))
 			}
 		}
 	}
@@ -301,7 +300,7 @@ func convertResponsesInput(messages []providers.Message) responses.ResponseInput
 func convertResponsesMultiModalToolResult(msg providers.Message) responses.ResponseInputParam {
 	text, images := splitToolResultParts(msg)
 	items := responses.ResponseInputParam{
-		responses.ResponseInputItemParamOfFunctionCallOutput(msg.ToolCallID, text),
+		responsesFunctionCallOutput(msg.ToolCallID, text),
 	}
 	if len(images) == 0 {
 		return items
@@ -438,7 +437,7 @@ func convertResponsesResponse(resp *responses.Response) *providers.ChatCompletio
 				Type: "function",
 				Function: providers.FunctionCall{
 					Name:      item.Name,
-					Arguments: item.Arguments,
+					Arguments: item.Arguments.OfString,
 				},
 			})
 		}
@@ -477,5 +476,21 @@ func convertResponsesUsage(usage responses.ResponseUsage) *providers.Usage {
 		TotalTokens:        int(usage.TotalTokens),
 		ReasoningTokens:    int(usage.OutputTokensDetails.ReasoningTokens),
 		CachedPromptTokens: int(usage.InputTokensDetails.CachedTokens),
+	}
+}
+
+// responsesFunctionCallOutput builds a function_call_output input item with a
+// plain-string output. openai-go v3's ResponseInputItemParamOfFunctionCallOutput
+// helper no longer takes the call ID (CallID became an optional field), so the
+// item is built directly. CallID is always set — even when empty — to keep the
+// wire shape identical to v1, where call_id was a required field.
+func responsesFunctionCallOutput(callID, output string) responses.ResponseInputItemUnionParam {
+	return responses.ResponseInputItemUnionParam{
+		OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
+			CallID: openai.String(callID),
+			Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
+				OfString: openai.String(output),
+			},
+		},
 	}
 }

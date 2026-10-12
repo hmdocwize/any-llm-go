@@ -25,7 +25,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 
 	"github.com/mozilla-ai/any-llm-go/config"
 	"github.com/mozilla-ai/any-llm-go/errors"

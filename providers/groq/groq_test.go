@@ -3,9 +3,13 @@ package groq
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	oaisdk "github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mozilla-ai/any-llm-go/config"
@@ -84,9 +88,74 @@ func TestProviderName(t *testing.T) {
 func skipIfToolUseFailed(t *testing.T, err error) {
 	t.Helper()
 
-	if err != nil && strings.Contains(err.Error(), "tool_use_failed") {
+	if isToolUseFailed(err) {
 		t.Skipf("Groq tool_use_failed (model attempted tool call with malformed output): %v", err)
 	}
+}
+
+// isToolUseFailed reports whether err wraps an API error with Groq's
+// tool_use_failed code. It inspects the structured SDK error rather than the
+// error text, which openai-go v3 no longer populates with the response body.
+func isToolUseFailed(err error) bool {
+	var apiErr *oaisdk.Error
+	return stderrors.As(err, &apiErr) && apiErr.Code == apiCodeToolUseFailed
+}
+
+func TestIsToolUseFailed(t *testing.T) {
+	t.Parallel()
+
+	newTestServer := func(t *testing.T, body string) *httptest.Server {
+		t.Helper()
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(srv.Close)
+
+		return srv
+	}
+
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "tool_use_failed code",
+			body: `{"error":{"message":"Failed to call a function.","type":"invalid_request_error","code":"tool_use_failed"}}`,
+			want: true,
+		},
+		{
+			name: "other code",
+			body: `{"error":{"message":"bad","type":"invalid_request_error","code":"other"}}`,
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newTestServer(t, tc.body)
+			provider, err := New(config.WithAPIKey("test-key"), config.WithBaseURL(srv.URL))
+			require.NoError(t, err)
+
+			_, err = provider.Completion(context.Background(), providers.CompletionParams{
+				Model:    "test-model",
+				Messages: []providers.Message{{Role: providers.RoleUser, Content: "Hello"}},
+			})
+			require.Error(t, err)
+			require.Equal(t, tc.want, isToolUseFailed(err))
+		})
+	}
+
+	t.Run("nil error", func(t *testing.T) {
+		t.Parallel()
+
+		require.False(t, isToolUseFailed(nil))
+	})
 }
 
 // Integration tests - only run if Groq API key is available.

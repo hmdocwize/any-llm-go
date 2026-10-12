@@ -2,11 +2,14 @@ package openai
 
 import (
 	"context"
+	stderrors "errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mozilla-ai/any-llm-go/config"
@@ -456,4 +459,147 @@ func TestStreamingContextCancellation(t *testing.T) {
 			t.Fatal("expected an error on errs after cancellation, got nothing")
 		}
 	})
+}
+
+// TestNewCompatibleIgnoresSDKCustomHeadersEnv is a regression test: openai-go
+// v3 reads OPENAI_CUSTOM_HEADERS and adds its entries to every request, which
+// would forward them to non-OpenAI hosts. Headers set explicitly via
+// config.WithHeader must still be sent.
+func TestNewCompatibleIgnoresSDKCustomHeadersEnv(t *testing.T) {
+	// Note: Not using t.Parallel() because of t.Setenv.
+	t.Setenv(envSDKCustomHeaders, "X-Leak: secret\nX-Other: 2\nmalformed-line")
+
+	var (
+		mu       sync.Mutex
+		captured []http.Header
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		captured = append(captured, r.Header.Clone())
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"stop","type":"invalid_request_error","code":"test"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	provider, err := NewCompatible(
+		CompatibleConfig{
+			Name:                             "test-provider",
+			DefaultAPIKey:                    "test-key",
+			DefaultBaseURL:                   srv.URL + "/v1",
+			UseResponsesAPIForReasoningTools: true,
+		},
+		config.WithHeader("X-Other", "explicit"),
+	)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	params := providers.CompletionParams{
+		Model:    "test-model",
+		Messages: []providers.Message{{Role: providers.RoleUser, Content: "Hello"}},
+	}
+	responsesParams := params
+	responsesParams.ReasoningEffort = providers.ReasoningEffortLow
+	responsesParams.Tools = []providers.Tool{{Type: "function", Function: providers.Function{Name: "noop"}}}
+
+	// Errors are expected: the server rejects every request after capturing it.
+	_, _ = provider.Completion(ctx, params)
+	_, _ = provider.Completion(ctx, responsesParams)
+	_, _ = provider.Embedding(ctx, providers.EmbeddingParams{Model: "test-embed", Input: "hi"})
+	_, _ = provider.ListModels(ctx)
+	chunks, errs := provider.CompletionStream(ctx, params)
+	for range chunks {
+	}
+	<-errs
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, captured, 5)
+	for _, h := range captured {
+		require.Empty(t, h.Values("X-Leak"))
+		require.Equal(t, []string{"explicit"}, h.Values("X-Other"))
+	}
+}
+
+// TestConvertErrorIncludesServerDetail is a regression test: openai-go v3's
+// Error() no longer includes the response body, so the server's message and
+// code must be surfaced by ConvertError while keeping the SDK error reachable.
+func TestConvertErrorIncludesServerDetail(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(
+			[]byte(
+				`{"error":{"message":"Failed to call a function","type":"invalid_request_error","code":"tool_use_failed"}}`,
+			),
+		)
+	}))
+	t.Cleanup(srv.Close)
+
+	provider, err := NewCompatible(CompatibleConfig{
+		Name:           "test-provider",
+		DefaultAPIKey:  "test-key",
+		DefaultBaseURL: srv.URL + "/v1",
+	})
+	require.NoError(t, err)
+
+	_, err = provider.Completion(context.Background(), providers.CompletionParams{
+		Model:    "test-model",
+		Messages: []providers.Message{{Role: providers.RoleUser, Content: "Hello"}},
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, errors.ErrInvalidRequest)
+	require.Contains(t, err.Error(), "Failed to call a function")
+	require.Contains(t, err.Error(), "code=tool_use_failed")
+	require.Contains(t, err.Error(), "type=invalid_request_error")
+	require.NotContains(t, err.Error(), srv.URL)
+
+	var apiErr *openai.Error
+	require.True(t, stderrors.As(err, &apiErr))
+	require.Equal(t, "tool_use_failed", apiErr.Code)
+}
+
+func TestWithAPIErrorDetail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		apiErr *openai.Error
+		want   string
+	}{
+		{
+			name:   "no detail returns original error text",
+			apiErr: &openai.Error{StatusCode: http.StatusBadRequest},
+			want:   "OpenAI API error: 400 Bad Request",
+		},
+		{
+			name:   "message only",
+			apiErr: &openai.Error{StatusCode: http.StatusBadRequest, Message: "bad"},
+			want:   "OpenAI API error: 400 Bad Request: bad",
+		},
+		{
+			name:   "code only",
+			apiErr: &openai.Error{StatusCode: http.StatusBadRequest, Code: "c"},
+			want:   "OpenAI API error: 400 Bad Request: (code=c)",
+		},
+		{
+			name:   "all fields",
+			apiErr: &openai.Error{StatusCode: http.StatusBadRequest, Code: "c", Message: "bad", Type: "t"},
+			want:   "OpenAI API error: 400 Bad Request: bad (code=c, type=t)",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := withAPIErrorDetail(tc.apiErr, tc.apiErr)
+			require.EqualError(t, got, tc.want)
+			require.ErrorIs(t, got, tc.apiErr)
+		})
+	}
 }

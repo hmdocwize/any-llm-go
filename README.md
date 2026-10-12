@@ -347,7 +347,7 @@ if errors.As(err, &rateLimitErr) {
 
 - **Simple, unified interface** - Same types and patterns across all providers, switch models with just a string change
 - **Developer friendly** - Full type definitions for better IDE support and clear, actionable error messages
-- **Leverages official provider SDKs** - Uses `github.com/openai/openai-go` and `github.com/anthropics/anthropic-sdk-go` for maximum compatibility
+- **Leverages official provider SDKs** - Uses `github.com/openai/openai-go/v3` and `github.com/anthropics/anthropic-sdk-go` for maximum compatibility
 - **Stays framework-agnostic** so it can be used across different projects and use cases
 - **Idiomatic Go** - Follows Go conventions with proper error handling and context support
 - **Streaming support** - Channel-based streaming that's natural in Go

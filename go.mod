@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/mozilla-ai/any-llm-platform-client-go v0.0.1
 	github.com/ollama/ollama v0.40.3
-	github.com/openai/openai-go v1.12.0
+	github.com/openai/openai-go/v3 v3.77.0
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/genai v1.73.0
 )
@@ -19,6 +19,7 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.6.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
