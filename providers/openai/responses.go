@@ -14,11 +14,12 @@ import (
 	"github.com/mozilla-ai/any-llm-go/providers"
 )
 
-// Responses API output item and content types.
+// Responses API input/output item and content types.
 const (
-	outputItemTypeFunctionCall = "function_call"
-	outputItemTypeMessage      = "message"
-	outputContentTypeText      = "output_text"
+	inputItemTypeFunctionCallOutput = "function_call_output"
+	outputItemTypeFunctionCall      = "function_call"
+	outputItemTypeMessage           = "message"
+	outputContentTypeText           = "output_text"
 )
 
 // Responses API stream event types (subset this provider consumes).
@@ -33,7 +34,17 @@ const (
 	streamEventReasoningSummaryDelta = "response.reasoning_summary_text.delta"
 )
 
-const incompleteReasonMaxOutputTokens = "max_output_tokens"
+// Responses API incomplete_details.reason values with a normalized mapping.
+const (
+	incompleteReasonContentFilter   = "content_filter"
+	incompleteReasonMaxOutputTokens = "max_output_tokens"
+)
+
+// Chat-completion parameters the Responses API has no field for.
+const (
+	paramSeed = "seed"
+	paramStop = "stop"
+)
 
 // shouldUseResponsesAPI reports whether a request must be served by
 // POST /v1/responses instead of /v1/chat/completions. OpenAI's reasoning
@@ -57,9 +68,17 @@ func (p *CompatibleProvider) completionViaResponses(
 	ctx context.Context,
 	params providers.CompletionParams,
 ) (*providers.ChatCompletion, error) {
+	if err := validateResponsesParams(p.compatibleConfig.Name, params); err != nil {
+		return nil, err
+	}
 	resp, err := p.client.Responses.New(ctx, convertResponsesParams(params))
 	if err != nil {
 		return nil, p.ConvertError(err)
+	}
+	// A generation failure can arrive in an HTTP-200 body (status=failed with
+	// the error object populated); the SDK only errors on transport/non-2xx.
+	if resp.Status == responses.ResponseStatusFailed {
+		return nil, responsesFailureError(p.compatibleConfig.Name, resp.Error)
 	}
 	return convertResponsesResponse(resp), nil
 }
@@ -84,10 +103,16 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 	chunks chan<- providers.ChatCompletionChunk,
 	errs chan<- error,
 ) {
+	if err := validateResponsesParams(p.compatibleConfig.Name, params); err != nil {
+		errs <- err
+		return
+	}
 	stream := p.client.Responses.NewStreaming(ctx, convertResponsesParams(params))
 
 	var responseID string
 	var created int64
+	// Falls back to the requested model when response.created carries none.
+	model := params.Model
 	sawToolCall := false
 
 	emit := func(delta providers.ChunkDelta, finishReason string, usage *providers.Usage) bool {
@@ -95,7 +120,7 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 			ID:      responseID,
 			Object:  objectChatCompletionChunk,
 			Created: created,
-			Model:   params.Model,
+			Model:   model,
 			Choices: []providers.ChunkChoice{{Delta: delta, FinishReason: finishReason}},
 			Usage:   usage,
 		}
@@ -114,6 +139,9 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 		case streamEventCreated:
 			responseID = event.Response.ID
 			created = int64(event.Response.CreatedAt)
+			if event.Response.Model != "" {
+				model = event.Response.Model
+			}
 
 		case streamEventOutputTextDelta:
 			if event.Delta == "" {
@@ -127,7 +155,11 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 			if event.Delta == "" {
 				continue
 			}
-			if !emit(providers.ChunkDelta{Reasoning: &providers.Reasoning{Content: event.Delta}}, "", nil) {
+			delta := providers.ChunkDelta{
+				Role:      providers.RoleAssistant,
+				Reasoning: &providers.Reasoning{Content: event.Delta},
+			}
+			if !emit(delta, "", nil) {
 				return
 			}
 
@@ -153,21 +185,14 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 			}
 
 		case streamEventCompleted, streamEventIncomplete:
-			finishReason := providers.FinishReasonStop
-			if sawToolCall {
-				finishReason = providers.FinishReasonToolCalls
-			}
-			if event.Type == streamEventIncomplete &&
-				event.Response.IncompleteDetails.Reason == incompleteReasonMaxOutputTokens {
-				finishReason = providers.FinishReasonLength
-			}
+			// response.completed carries no incomplete_details, so its reason is "".
+			finishReason := responsesFinishReason(event.Response.IncompleteDetails.Reason, sawToolCall)
 			if !emit(providers.ChunkDelta{}, finishReason, convertResponsesUsage(event.Response.Usage)) {
 				return
 			}
 
 		case streamEventFailed:
-			errs <- errors.NewProviderError(p.compatibleConfig.Name, fmt.Errorf(
-				"responses API failure: %s: %s", event.Response.Error.Code, event.Response.Error.Message))
+			errs <- responsesFailureError(p.compatibleConfig.Name, event.Response.Error)
 			return
 
 		case streamEventError:
@@ -183,7 +208,8 @@ func (p *CompatibleProvider) streamCompletionViaResponses(
 }
 
 // convertResponsesParams converts providers.CompletionParams to Responses API
-// request parameters.
+// request parameters. The Responses API has no stop or seed field; callers
+// reject those up front via validateResponsesParams.
 func convertResponsesParams(params providers.CompletionParams) responses.ResponseNewParams {
 	req := responses.ResponseNewParams{
 		Model: shared.ResponsesModel(params.Model),
@@ -253,10 +279,18 @@ func convertResponsesParams(params providers.CompletionParams) responses.Respons
 
 // convertResponsesInput converts chat messages to Responses API input items.
 // Assistant tool calls become function_call items and tool-role messages
-// become function_call_output items, preserving conversation order.
+// become function_call_output items, preserving conversation order. Image
+// messages re-attached from multimodal tool results are deferred until the
+// run of consecutive tool results ends, so every function_call_output in a
+// parallel-call group precedes them (matching convertMessages).
 func convertResponsesInput(messages []providers.Message) responses.ResponseInputParam {
 	items := make(responses.ResponseInputParam, 0, len(messages))
+	var deferredImages responses.ResponseInputParam
 	for _, msg := range messages {
+		if msg.Role != providers.RoleTool {
+			items = append(items, deferredImages...)
+			deferredImages = nil
+		}
 		switch msg.Role {
 		case providers.RoleSystem:
 			items = append(items, responses.ResponseInputItemParamOfMessage(
@@ -282,28 +316,34 @@ func convertResponsesInput(messages []providers.Message) responses.ResponseInput
 			}
 
 		case providers.RoleTool:
-			if msg.IsMultiModal() {
-				items = append(items, convertResponsesMultiModalToolResult(msg)...)
-			} else {
+			if !msg.IsMultiModal() {
 				items = append(items, responsesFunctionCallOutput(msg.ToolCallID, msg.ContentString()))
+				continue
+			}
+			output, imageMsg := convertResponsesMultiModalToolResult(msg)
+			items = append(items, output)
+			if imageMsg != nil {
+				deferredImages = append(deferredImages, *imageMsg)
 			}
 		}
 	}
-	return items
+	return append(items, deferredImages...)
 }
 
 // convertResponsesMultiModalToolResult converts a tool message whose content
 // is a []ContentPart. Responses API function_call_output accepts only string
-// output, so text parts form the output and image parts are re-attached as an
-// immediately following user message referencing the tool call — the same
-// strategy as convertMultiModalToolMessage on the Chat Completions path.
-func convertResponsesMultiModalToolResult(msg providers.Message) responses.ResponseInputParam {
+// output, so text parts form the output and image parts are returned as a
+// separate user message referencing the tool call (nil when there are no
+// images), which convertResponsesInput places after the whole tool-result
+// run — the same strategy as convertMultiModalToolMessage on the Chat
+// Completions path.
+func convertResponsesMultiModalToolResult(
+	msg providers.Message,
+) (responses.ResponseInputItemUnionParam, *responses.ResponseInputItemUnionParam) {
 	text, images := splitToolResultParts(msg)
-	items := responses.ResponseInputParam{
-		responsesFunctionCallOutput(msg.ToolCallID, text),
-	}
+	output := responsesFunctionCallOutput(msg.ToolCallID, text)
 	if len(images) == 0 {
-		return items
+		return output, nil
 	}
 
 	content := responses.ResponseInputMessageContentListParam{
@@ -319,8 +359,8 @@ func convertResponsesMultiModalToolResult(msg providers.Message) responses.Respo
 			},
 		})
 	}
-	return append(items, responses.ResponseInputItemParamOfInputMessage(
-		content, string(responses.EasyInputMessageRoleUser)))
+	imageMsg := responses.ResponseInputItemParamOfInputMessage(content, string(responses.EasyInputMessageRoleUser))
+	return output, &imageMsg
 }
 
 // convertResponsesContentParts converts multi-modal content parts to
@@ -444,13 +484,7 @@ func convertResponsesResponse(resp *responses.Response) *providers.ChatCompletio
 	}
 	message.Content = textBuilder.String()
 
-	finishReason := providers.FinishReasonStop
-	if len(message.ToolCalls) > 0 {
-		finishReason = providers.FinishReasonToolCalls
-	}
-	if resp.IncompleteDetails.Reason == incompleteReasonMaxOutputTokens {
-		finishReason = providers.FinishReasonLength
-	}
+	finishReason := responsesFinishReason(resp.IncompleteDetails.Reason, len(message.ToolCalls) > 0)
 
 	return &providers.ChatCompletion{
 		ID:      resp.ID,
@@ -479,6 +513,34 @@ func convertResponsesUsage(usage responses.ResponseUsage) *providers.Usage {
 	}
 }
 
+// responsesFailureError converts a Responses API error object (from a
+// status=failed response or a response.failed stream event) to a provider error.
+func responsesFailureError(provider string, respErr responses.ResponseError) error {
+	return errors.NewProviderError(provider, fmt.Errorf(
+		"responses API failure: %s: %s", respErr.Code, respErr.Message))
+}
+
+// responsesFinishReason maps a Responses API termination to a normalized
+// finish reason. incompleteReason is the incomplete_details.reason ("" for a
+// completed response).
+func responsesFinishReason(incompleteReason string, sawToolCall bool) string {
+	switch incompleteReason {
+	case "":
+		if sawToolCall {
+			return providers.FinishReasonToolCalls
+		}
+		return providers.FinishReasonStop
+	case incompleteReasonContentFilter:
+		return providers.FinishReasonContentFilter
+	case incompleteReasonMaxOutputTokens:
+		return providers.FinishReasonLength
+	default:
+		// Unknown incomplete reason (e.g. max_messages, steered): surface it
+		// verbatim rather than reporting a clean stop.
+		return incompleteReason
+	}
+}
+
 // responsesFunctionCallOutput builds a function_call_output input item with a
 // plain-string output. openai-go v3's ResponseInputItemParamOfFunctionCallOutput
 // helper no longer takes the call ID (CallID became an optional field), so the
@@ -493,4 +555,16 @@ func responsesFunctionCallOutput(callID, output string) responses.ResponseInputI
 			},
 		},
 	}
+}
+
+// validateResponsesParams rejects CompletionParams the Responses API cannot
+// represent, rather than silently dropping them.
+func validateResponsesParams(provider string, params providers.CompletionParams) error {
+	if len(params.Stop) > 0 {
+		return errors.NewUnsupportedParamError(provider, paramStop)
+	}
+	if params.Seed != nil {
+		return errors.NewUnsupportedParamError(provider, paramSeed)
+	}
+	return nil
 }

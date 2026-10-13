@@ -98,6 +98,8 @@ type CompatibleConfig struct {
 	// reasoning models reject that combination on /v1/chat/completions, but
 	// only the OpenAI platform itself serves the Responses API — compatible
 	// endpoints (DeepSeek, Groq, gateways, Workers AI) must leave this false.
+	// Routed requests that set Stop or Seed fail with ErrUnsupportedParam,
+	// since the Responses API has no equivalent fields.
 	UseResponsesAPIForReasoningTools bool
 }
 
@@ -579,13 +581,26 @@ func convertMessage(msg providers.Message) (openai.ChatCompletionMessageParamUni
 }
 
 // convertMessages converts provider messages to OpenAI format. Tool messages
-// carrying content parts expand to multiple wire messages (see
+// carrying images expand to a tool message plus a user image message (see
 // convertMultiModalToolMessage), so the output may be longer than the input.
+// Image messages are deferred until the run of consecutive tool messages ends:
+// Chat Completions requires every tool_call_id of an assistant turn to be
+// answered before any other message, so a parallel-call group must not be
+// split by a user message.
 func convertMessages(messages []providers.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	result := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
+	var deferredImages []openai.ChatCompletionMessageParamUnion
 	for _, msg := range messages {
+		if msg.Role != providers.RoleTool {
+			result = append(result, deferredImages...)
+			deferredImages = nil
+		}
 		if msg.Role == providers.RoleTool && msg.IsMultiModal() {
-			result = append(result, convertMultiModalToolMessage(msg)...)
+			toolMsg, imageMsg := convertMultiModalToolMessage(msg)
+			result = append(result, toolMsg)
+			if imageMsg != nil {
+				deferredImages = append(deferredImages, *imageMsg)
+			}
 			continue
 		}
 		converted, err := convertMessage(msg)
@@ -594,21 +609,24 @@ func convertMessages(messages []providers.Message) ([]openai.ChatCompletionMessa
 		}
 		result = append(result, converted)
 	}
-	return result, nil
+	return append(result, deferredImages...), nil
 }
 
 // convertMultiModalToolMessage converts a tool message whose content is a
 // []ContentPart. The Chat Completions API accepts only text in tool messages,
 // so the text parts become the tool message body and any image parts are
-// re-attached as an immediately following user message that references the
-// tool call — vision models read it like a user-provided screenshot of the
-// tool output. (The Responses API has the same text-only constraint; see
+// returned as a separate user message that references the tool call (nil when
+// there are no images); convertMessages places it after the whole tool-result
+// run. Vision models read it like a user-provided screenshot of the tool
+// output. (The Responses API has the same text-only constraint; see
 // convertResponsesInput.)
-func convertMultiModalToolMessage(msg providers.Message) []openai.ChatCompletionMessageParamUnion {
+func convertMultiModalToolMessage(
+	msg providers.Message,
+) (openai.ChatCompletionMessageParamUnion, *openai.ChatCompletionMessageParamUnion) {
 	text, images := splitToolResultParts(msg)
-	result := []openai.ChatCompletionMessageParamUnion{openai.ToolMessage(text, msg.ToolCallID)}
+	toolMsg := openai.ToolMessage(text, msg.ToolCallID)
 	if len(images) == 0 {
-		return result
+		return toolMsg, nil
 	}
 
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(images)+1)
@@ -618,7 +636,8 @@ func convertMultiModalToolMessage(msg providers.Message) []openai.ChatCompletion
 			URL: image.ImageURL.URL,
 		}))
 	}
-	return append(result, openai.UserMessage(parts))
+	imageMsg := openai.UserMessage(parts)
+	return toolMsg, &imageMsg
 }
 
 // splitToolResultParts separates a multimodal tool result into its joined
