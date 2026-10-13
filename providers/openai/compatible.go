@@ -157,16 +157,18 @@ func NewCompatible(compatCfg CompatibleConfig, opts ...config.Option) (*Compatib
 		apiKey = compatCfg.DefaultAPIKey
 	}
 
-	clientOpts := []option.RequestOption{
+	// Env header deletions must precede WithAPIKey: deleting Authorization marks
+	// it as a manual override, which suppresses the SDK's bearer auth unless an
+	// API key is set afterwards.
+	clientOpts := append(
+		sdkEnvHeaderDeletions(),
 		option.WithAPIKey(apiKey),
 		option.WithHTTPClient(cfg.HTTPClient()),
-	}
+	)
 
 	if baseURL != "" {
 		clientOpts = append(clientOpts, option.WithBaseURL(baseURL))
 	}
-
-	clientOpts = append(clientOpts, sdkEnvHeaderDeletions()...)
 
 	return &CompatibleProvider{
 		compatibleConfig: compatCfg,

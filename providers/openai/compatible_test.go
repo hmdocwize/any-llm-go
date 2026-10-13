@@ -467,7 +467,7 @@ func TestStreamingContextCancellation(t *testing.T) {
 // config.WithHeader must still be sent.
 func TestNewCompatibleIgnoresSDKCustomHeadersEnv(t *testing.T) {
 	// Note: Not using t.Parallel() because of t.Setenv.
-	t.Setenv(envSDKCustomHeaders, "X-Leak: secret\nX-Other: 2\nmalformed-line")
+	t.Setenv(envSDKCustomHeaders, "X-Leak: secret\nX-Other: 2\nAuthorization: Bearer env-secret\nmalformed-line")
 
 	var (
 		mu       sync.Mutex
@@ -520,6 +520,7 @@ func TestNewCompatibleIgnoresSDKCustomHeadersEnv(t *testing.T) {
 	for _, h := range captured {
 		require.Empty(t, h.Values("X-Leak"))
 		require.Equal(t, []string{"explicit"}, h.Values("X-Other"))
+		require.Equal(t, []string{"Bearer test-key"}, h.Values("Authorization"))
 	}
 }
 
