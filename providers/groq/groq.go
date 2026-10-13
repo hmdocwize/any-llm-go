@@ -15,6 +15,12 @@ const (
 	providerName   = "groq"
 )
 
+// Groq API error codes.
+const (
+	// apiCodeToolUseFailed is returned when the model emits a tool call Groq cannot parse.
+	apiCodeToolUseFailed = "tool_use_failed"
+)
+
 // Object type constants for API responses.
 const (
 	objectChatCompletion      = "chat.completion"

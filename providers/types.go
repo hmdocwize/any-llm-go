@@ -19,8 +19,10 @@ const (
 	ReasoningEffortAuto   ReasoningEffort = "auto"
 	ReasoningEffortHigh   ReasoningEffort = "high"
 	ReasoningEffortLow    ReasoningEffort = "low"
+	ReasoningEffortMax    ReasoningEffort = "max"
 	ReasoningEffortMedium ReasoningEffort = "medium"
 	ReasoningEffortNone   ReasoningEffort = "none"
+	ReasoningEffortXHigh  ReasoningEffort = "xhigh"
 )
 
 // Message roles.
@@ -95,7 +97,7 @@ type Capabilities struct {
 	CompletionImage     bool
 	CompletionPDF       bool
 	CompletionReasoning bool
-	CompletionStreaming  bool
+	CompletionStreaming bool
 	CompletionTools     bool
 	Embedding           bool
 	ListModels          bool
@@ -320,6 +322,18 @@ type ModelsResponse struct {
 // Reasoning represents extended thinking/reasoning content.
 type Reasoning struct {
 	Content string `json:"content,omitempty"`
+
+	// Extra holds provider-specific metadata for round-tripping a reasoning
+	// block across multi-turn conversations — the same role Extra plays on
+	// ToolCall, and for the same reason: a provider that binds a reasoning
+	// block to an opaque, must-echo-verbatim value (Anthropic's thinking-block
+	// `signature` / `redacted_thinking`'s `data`; Gemini's function-call
+	// ThoughtSignature lives on ToolCall.Extra instead, since Gemini attaches
+	// it per call rather than per message) has nowhere else to carry that
+	// value between the response that produced it and the request that
+	// replays it. Keyed by provider name (e.g. "anthropic"). Excluded from
+	// JSON; callers preserve this through their own storage.
+	Extra map[string]ProviderData `json:"-"`
 }
 
 // ResponseFormat specifies the format of the response.
@@ -367,6 +381,12 @@ type Usage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
+	// CachedPromptTokens is the subset of PromptTokens served from the
+	// provider's prompt/prefix cache (OpenAI prompt_tokens_details.cached_tokens).
+	// Providers that do server-side prefix caching (OpenAI, Cloudflare Workers AI)
+	// report it here so callers can attribute the discounted cached portion; 0
+	// when the provider does not report cached tokens.
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
 }
 
 // ContentParts extracts content parts from a message.

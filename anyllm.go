@@ -56,8 +56,10 @@ const (
 	ReasoningEffortAuto   = providers.ReasoningEffortAuto
 	ReasoningEffortHigh   = providers.ReasoningEffortHigh
 	ReasoningEffortLow    = providers.ReasoningEffortLow
+	ReasoningEffortMax    = providers.ReasoningEffortMax
 	ReasoningEffortMedium = providers.ReasoningEffortMedium
 	ReasoningEffortNone   = providers.ReasoningEffortNone
+	ReasoningEffortXHigh  = providers.ReasoningEffortXHigh
 )
 
 // Provider types.
@@ -112,6 +114,7 @@ type (
 type (
 	Function           = providers.Function
 	FunctionCall       = providers.FunctionCall
+	ProviderData       = providers.ProviderData
 	Tool               = providers.Tool
 	ToolCall           = providers.ToolCall
 	ToolChoice         = providers.ToolChoice
@@ -179,17 +182,17 @@ var (
 
 // Error types.
 type (
-	AuthenticationError           = errors.AuthenticationError
-	BaseError                     = errors.BaseError
-	ContentFilterError            = errors.ContentFilterError
-	ContextLengthError            = errors.ContextLengthError
-	InsufficientFundsError        = errors.InsufficientFundsError
-	InvalidRequestError           = errors.InvalidRequestError
-	MissingAPIKeyError            = errors.MissingAPIKeyError
-	ModelNotFoundError            = errors.ModelNotFoundError
-	ProviderError                 = errors.ProviderError
-	RateLimitError                = errors.RateLimitError
-	UnsupportedOperationError     = errors.UnsupportedOperationError
-	UnsupportedParamError         = errors.UnsupportedParamError
-	UnsupportedProviderError      = errors.UnsupportedProviderError
+	AuthenticationError       = errors.AuthenticationError
+	BaseError                 = errors.BaseError
+	ContentFilterError        = errors.ContentFilterError
+	ContextLengthError        = errors.ContextLengthError
+	InsufficientFundsError    = errors.InsufficientFundsError
+	InvalidRequestError       = errors.InvalidRequestError
+	MissingAPIKeyError        = errors.MissingAPIKeyError
+	ModelNotFoundError        = errors.ModelNotFoundError
+	ProviderError             = errors.ProviderError
+	RateLimitError            = errors.RateLimitError
+	UnsupportedOperationError = errors.UnsupportedOperationError
+	UnsupportedParamError     = errors.UnsupportedParamError
+	UnsupportedProviderError  = errors.UnsupportedProviderError
 )

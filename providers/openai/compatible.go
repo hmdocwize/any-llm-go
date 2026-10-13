@@ -4,12 +4,16 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"os"
+	"strings"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/respjson"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/mozilla-ai/any-llm-go/config"
 	"github.com/mozilla-ai/any-llm-go/errors"
@@ -25,6 +29,10 @@ const (
 	apiCodeModelNotFound         = "model_not_found"
 	apiCodeRateLimitExceeded     = "rate_limit_exceeded"
 )
+
+// envSDKCustomHeaders is the environment variable that openai-go v3 reads in
+// DefaultClientOptions to inject arbitrary headers into every request.
+const envSDKCustomHeaders = "OPENAI_CUSTOM_HEADERS"
 
 // Object type constants.
 const (
@@ -84,6 +92,15 @@ type CompatibleConfig struct {
 	// returns an error if none of those yield a value. Used by providers that
 	// have no sensible default endpoint (e.g. gateway).
 	RequireBaseURL bool
+
+	// UseResponsesAPIForReasoningTools routes requests that combine function
+	// tools with a non-none reasoning effort to POST /v1/responses. OpenAI's
+	// reasoning models reject that combination on /v1/chat/completions, but
+	// only the OpenAI platform itself serves the Responses API — compatible
+	// endpoints (DeepSeek, Groq, gateways, Workers AI) must leave this false.
+	// Routed requests that set Stop or Seed fail with ErrUnsupportedParam,
+	// since the Responses API has no equivalent fields.
+	UseResponsesAPIForReasoningTools bool
 }
 
 // Ensure CompatibleProvider implements the required interfaces.
@@ -142,10 +159,14 @@ func NewCompatible(compatCfg CompatibleConfig, opts ...config.Option) (*Compatib
 		apiKey = compatCfg.DefaultAPIKey
 	}
 
-	clientOpts := []option.RequestOption{
+	// Env header deletions must precede WithAPIKey: deleting Authorization marks
+	// it as a manual override, which suppresses the SDK's bearer auth unless an
+	// API key is set afterwards.
+	clientOpts := append(
+		sdkEnvHeaderDeletions(),
 		option.WithAPIKey(apiKey),
 		option.WithHTTPClient(cfg.HTTPClient()),
-	}
+	)
 
 	if baseURL != "" {
 		clientOpts = append(clientOpts, option.WithBaseURL(baseURL))
@@ -171,7 +192,12 @@ func (p *CompatibleProvider) Completion(
 		return nil, err
 	}
 
+	if p.shouldUseResponsesAPI(params) {
+		return p.completionViaResponses(ctx, params)
+	}
+
 	req := convertParams(params)
+	p.applyExplicitNoneEffort(&req, params)
 	if p.compatibleConfig.ChatCompletionRequestTransform != nil {
 		p.compatibleConfig.ChatCompletionRequestTransform(&req)
 	}
@@ -201,7 +227,13 @@ func (p *CompatibleProvider) CompletionStream(
 			return
 		}
 
+		if p.shouldUseResponsesAPI(params) {
+			p.streamCompletionViaResponses(ctx, params, chunks, errs)
+			return
+		}
+
 		req := convertParams(params)
+		p.applyExplicitNoneEffort(&req, params)
 		if p.compatibleConfig.ChatCompletionRequestTransform != nil {
 			p.compatibleConfig.ChatCompletionRequestTransform(&req)
 		}
@@ -227,6 +259,24 @@ func (p *CompatibleProvider) CompletionStream(
 	}()
 
 	return chunks, errs
+}
+
+// applyExplicitNoneEffort sends reasoning_effort:"none" on the wire when the
+// caller asked for none alongside function tools. convertParams drops "none"
+// (correct for OpenAI-compatible endpoints that reject the parameter), but
+// OpenAI's reasoning models default reasoning ON, and with tools present a
+// chat-completions request without an explicit "none" is rejected outright —
+// so on the OpenAI platform (same config gate as the Responses API routing)
+// the "none" must actually reach the wire.
+func (p *CompatibleProvider) applyExplicitNoneEffort(
+	req *openai.ChatCompletionNewParams,
+	params providers.CompletionParams,
+) {
+	if p.compatibleConfig.UseResponsesAPIForReasoningTools &&
+		len(params.Tools) > 0 &&
+		params.ReasoningEffort == providers.ReasoningEffortNone {
+		req.ReasoningEffort = shared.ReasoningEffort(providers.ReasoningEffortNone)
+	}
 }
 
 // ConvertError converts OpenAI-compatible errors to unified error types.
@@ -295,46 +345,52 @@ func (p *CompatibleProvider) Name() string {
 
 // convertAPIError converts an OpenAI API error to a unified error type.
 func convertAPIError(name string, apiErr *openai.Error, originalErr error) error {
+	// openai-go v3 reduces Error() to a status summary; restore the server's
+	// message and code so callers and logs can see why the request failed.
+	cause := withAPIErrorDetail(apiErr, originalErr)
+
 	switch apiErr.StatusCode {
 	case 400:
 		if apiErr.Code == apiCodeContextLengthExceeded {
-			return errors.NewContextLengthError(name, originalErr)
+			return errors.NewContextLengthError(name, cause)
 		}
 		if apiErr.Code == apiCodeContentFilter || apiErr.Code == apiCodeContentPolicyViolated {
-			return errors.NewContentFilterError(name, originalErr)
+			return errors.NewContentFilterError(name, cause)
 		}
-		return errors.NewInvalidRequestError(name, originalErr)
+		return errors.NewInvalidRequestError(name, cause)
 	case 401:
-		return errors.NewAuthenticationError(name, originalErr)
+		return errors.NewAuthenticationError(name, cause)
 	case 404:
-		return errors.NewModelNotFoundError(name, originalErr)
+		return errors.NewModelNotFoundError(name, cause)
 	case 429:
-		return errors.NewRateLimitError(name, originalErr)
+		return errors.NewRateLimitError(name, cause)
 	}
 
 	// Check error code for additional classification.
 	switch apiErr.Code {
 	case apiCodeInvalidAPIKey:
-		return errors.NewAuthenticationError(name, originalErr)
+		return errors.NewAuthenticationError(name, cause)
 	case apiCodeModelNotFound:
-		return errors.NewModelNotFoundError(name, originalErr)
+		return errors.NewModelNotFoundError(name, cause)
 	case apiCodeRateLimitExceeded:
-		return errors.NewRateLimitError(name, originalErr)
+		return errors.NewRateLimitError(name, cause)
 	}
 
-	return errors.NewProviderError(name, originalErr)
+	return errors.NewProviderError(name, cause)
 }
 
 // convertAssistantMessage converts an assistant message to OpenAI format.
 func convertAssistantMessage(msg providers.Message) openai.ChatCompletionMessageParamUnion {
 	if len(msg.ToolCalls) > 0 {
-		toolCalls := make([]openai.ChatCompletionMessageToolCallParam, 0, len(msg.ToolCalls))
+		toolCalls := make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(msg.ToolCalls))
 		for _, tc := range msg.ToolCalls {
-			toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallParam{
-				ID: tc.ID,
-				Function: openai.ChatCompletionMessageToolCallFunctionParam{
-					Name:      tc.Function.Name,
-					Arguments: tc.Function.Arguments,
+			toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+					ID: tc.ID,
+					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
 				},
 			})
 		}
@@ -377,27 +433,69 @@ func convertChunk(chunk *openai.ChatCompletionChunk) providers.ChatCompletionChu
 			}
 		}
 
+		// Reasoning/extended-thinking deltas are non-standard OpenAI fields that
+		// reasoning models (DeepSeek-R1, Moonshot Kimi, etc.) stream via the
+		// OpenAI-compatible surface — most commonly as a string field named
+		// "reasoning_content" (some emit "reasoning"). The generated openai-go
+		// struct has no field for them, so they land in Delta.JSON.ExtraFields.
+		// Copy whichever is present into the typed ChunkDelta.Reasoning so callers
+		// can surface a live reasoning trace. A "reasoning" object (vs a string)
+		// simply fails the string unmarshal and is skipped — never fatal.
+		if reasoning := reasoningDeltaContent(choice.Delta.JSON.ExtraFields); reasoning != "" {
+			chunkChoice.Delta.Reasoning = &providers.Reasoning{Content: reasoning}
+		}
+
 		choices = append(choices, chunkChoice)
 	}
 
 	result := providers.ChatCompletionChunk{
-		ID:                chunk.ID,
-		Object:            objectChatCompletionChunk,
-		Created:           chunk.Created,
-		Model:             chunk.Model,
-		Choices:           choices,
-		SystemFingerprint: chunk.SystemFingerprint,
+		ID:      chunk.ID,
+		Object:  objectChatCompletionChunk,
+		Created: chunk.Created,
+		Model:   chunk.Model,
+		Choices: choices,
+		// Deprecated upstream in openai-go v3 but still populated by OpenAI and
+		// OpenAI-compatible endpoints; forwarded unchanged to keep the
+		// normalized output stable.
+		SystemFingerprint: chunk.SystemFingerprint, //nolint:staticcheck // SA1019: see above.
 	}
 
 	if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
 		result.Usage = &providers.Usage{
-			PromptTokens:     int(chunk.Usage.PromptTokens),
-			CompletionTokens: int(chunk.Usage.CompletionTokens),
-			TotalTokens:      int(chunk.Usage.TotalTokens),
+			PromptTokens:       int(chunk.Usage.PromptTokens),
+			CompletionTokens:   int(chunk.Usage.CompletionTokens),
+			TotalTokens:        int(chunk.Usage.TotalTokens),
+			CachedPromptTokens: int(chunk.Usage.PromptTokensDetails.CachedTokens),
 		}
 	}
 
 	return result
+}
+
+// reasoningDeltaContent extracts streamed reasoning/extended-thinking text from a
+// chunk delta's non-standard ExtraFields. It checks "reasoning_content" first
+// (DeepSeek-R1 / Moonshot Kimi / Cloudflare Workers AI) then "reasoning". The raw
+// value is JSON, so it is unmarshalled into a string; a non-string value (e.g. a
+// "reasoning" object) fails the unmarshal and is skipped. Returns "" when absent.
+func reasoningDeltaContent(extra map[string]respjson.Field) string {
+	// NB: openai-go does not set status=valid on ExtraFields entries (Valid()
+	// returns false for them), it only stores their Raw() JSON — so key off Raw,
+	// not Valid, or the field is silently dropped.
+	for _, key := range []string{"reasoning_content", "reasoning"} {
+		field, ok := extra[key]
+		if !ok {
+			continue
+		}
+		raw := field.Raw()
+		if raw == "" || raw == respjson.Null {
+			continue
+		}
+		var content string
+		if err := json.Unmarshal([]byte(raw), &content); err == nil && content != "" {
+			return content
+		}
+	}
+	return ""
 }
 
 // convertEmbeddingParams converts provider embedding params to OpenAI format.
@@ -482,17 +580,128 @@ func convertMessage(msg providers.Message) (openai.ChatCompletionMessageParamUni
 	}
 }
 
-// convertMessages converts provider messages to OpenAI format.
+// convertMessages converts provider messages to OpenAI format. Tool messages
+// carrying images expand to a tool message plus a user image message (see
+// convertMultiModalToolMessage), so the output may be longer than the input.
+// Image messages are deferred until the run of consecutive tool messages ends:
+// Chat Completions requires every tool_call_id of an assistant turn to be
+// answered before any other message, so a parallel-call group must not be
+// split by a user message.
 func convertMessages(messages []providers.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	result := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
+	var deferredImages []openai.ChatCompletionMessageParamUnion
 	for _, msg := range messages {
+		if msg.Role != providers.RoleTool {
+			result = append(result, deferredImages...)
+			deferredImages = nil
+		}
+		if msg.Role == providers.RoleTool && msg.IsMultiModal() {
+			toolMsg, imageMsg := convertMultiModalToolMessage(msg)
+			result = append(result, toolMsg)
+			if imageMsg != nil {
+				deferredImages = append(deferredImages, *imageMsg)
+			}
+			continue
+		}
 		converted, err := convertMessage(msg)
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, converted)
 	}
-	return result, nil
+	return append(result, deferredImages...), nil
+}
+
+// convertMultiModalToolMessage converts a tool message whose content is a
+// []ContentPart. The Chat Completions API accepts only text in tool messages,
+// so the text parts become the tool message body and any image parts are
+// returned as a separate user message that references the tool call (nil when
+// there are no images); convertMessages places it after the whole tool-result
+// run. Vision models read it like a user-provided screenshot of the tool
+// output. (The Responses API has the same text-only constraint; see
+// convertResponsesInput.)
+func convertMultiModalToolMessage(
+	msg providers.Message,
+) (openai.ChatCompletionMessageParamUnion, *openai.ChatCompletionMessageParamUnion) {
+	text, images := splitToolResultParts(msg)
+	toolMsg := openai.ToolMessage(text, msg.ToolCallID)
+	if len(images) == 0 {
+		return toolMsg, nil
+	}
+
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(images)+1)
+	parts = append(parts, openai.TextContentPart(toolImageHeader(msg.ToolCallID, len(images))))
+	for _, image := range images {
+		parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+			URL: image.ImageURL.URL,
+		}))
+	}
+	imageMsg := openai.UserMessage(parts)
+	return toolMsg, &imageMsg
+}
+
+// splitToolResultParts separates a multimodal tool result into its joined
+// text and its image parts. When the result is image-only, a short text
+// placeholder keeps the tool message non-empty (both OpenAI APIs require
+// tool output text).
+func splitToolResultParts(msg providers.Message) (string, []providers.ContentPart) {
+	var textParts []string
+	var images []providers.ContentPart
+	for _, part := range msg.ContentParts() {
+		switch part.Type {
+		case contentTypeText:
+			if part.Text != "" {
+				textParts = append(textParts, part.Text)
+			}
+		case contentTypeImageURL:
+			if part.ImageURL != nil {
+				images = append(images, part)
+			}
+		}
+	}
+	text := strings.Join(textParts, "\n")
+	if text == "" && len(images) > 0 {
+		text = fmt.Sprintf("[%d image(s) returned; attached in the following user message]", len(images))
+	}
+	return text, images
+}
+
+// toolImageHeader is the text part that precedes re-attached tool images so
+// the model can associate them with the originating tool call.
+func toolImageHeader(toolCallID string, imageCount int) string {
+	return fmt.Sprintf("[%d image(s) output by tool call %s]", imageCount, toolCallID)
+}
+
+// extraKeyOpenAIPromptCacheKey is the CompletionParams.Extra key carrying an
+// OpenAI prompt_cache_key routing hint: a stable string that pins requests
+// sharing a long common prefix to the same cache machine, improving automatic
+// prompt-cache hit rate (developers.openai.com/api/docs/guides/prompt-caching).
+// Extra is json:"-" / in-memory only, so callers set it per request; empty or
+// absent ⇒ the field is omitted and OpenAI falls back to its default prefix hash.
+const extraKeyOpenAIPromptCacheKey = "openai_prompt_cache_key"
+
+// promptCacheKeyFromExtra extracts the OpenAI prompt_cache_key from Extra,
+// returning "" when absent or not a string. Reading a nil map is safe in Go.
+func promptCacheKeyFromExtra(extra map[string]any) string {
+	key, _ := extra[extraKeyOpenAIPromptCacheKey].(string)
+	return key
+}
+
+// extraKeyReasoningSummary is the CompletionParams.Extra key carrying the
+// reasoning-summary opt-in for the Responses API. Value "auto" ⇒ request the
+// model's reasoning summary (reasoning.summary=auto); empty or absent ⇒ omit it.
+// Reasoning summaries add latency/tokens, so they are opt-in, NOT the default:
+// the caller sets this per request only when the summary is actually wanted.
+// Extra is json:"-" / in-memory only. Read solely on the Responses path
+// (convertResponsesParams); the chat-completions path ignores it, so models that
+// stream reasoning natively there are unaffected.
+const extraKeyReasoningSummary = "reasoning_summary"
+
+// reasoningSummaryFromExtra extracts the reasoning-summary opt-in from Extra,
+// returning "" when absent or not a string. Reading a nil map is safe in Go.
+func reasoningSummaryFromExtra(extra map[string]any) string {
+	summary, _ := extra[extraKeyReasoningSummary].(string)
+	return summary
 }
 
 // convertParams converts providers.CompletionParams to OpenAI request parameters.
@@ -546,6 +755,13 @@ func convertParams(params providers.CompletionParams) openai.ChatCompletionNewPa
 		req.User = openai.String(params.User)
 	}
 
+	// prompt_cache_key: routing hint for OpenAI automatic prompt caching. Mirrors
+	// the User line above (both are param.Opt[string]). Only emitted when a caller
+	// supplied one via Extra, so the OFF path is unchanged.
+	if key := promptCacheKeyFromExtra(params.Extra); key != "" {
+		req.PromptCacheKey = openai.String(key)
+	}
+
 	if params.ReasoningEffort != "" && params.ReasoningEffort != providers.ReasoningEffortNone {
 		req.ReasoningEffort = shared.ReasoningEffort(params.ReasoningEffort)
 	}
@@ -571,19 +787,21 @@ func convertResponse(resp *openai.ChatCompletion) *providers.ChatCompletion {
 	}
 
 	result := &providers.ChatCompletion{
-		ID:                resp.ID,
-		Object:            objectChatCompletion,
-		Created:           resp.Created,
-		Model:             resp.Model,
-		Choices:           choices,
-		SystemFingerprint: resp.SystemFingerprint,
+		ID:      resp.ID,
+		Object:  objectChatCompletion,
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: choices,
+		// Deprecated upstream in openai-go v3; forwarded unchanged (see convertChunk).
+		SystemFingerprint: resp.SystemFingerprint, //nolint:staticcheck // SA1019: see above.
 	}
 
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
 		result.Usage = &providers.Usage{
-			PromptTokens:     int(resp.Usage.PromptTokens),
-			CompletionTokens: int(resp.Usage.CompletionTokens),
-			TotalTokens:      int(resp.Usage.TotalTokens),
+			PromptTokens:       int(resp.Usage.PromptTokens),
+			CompletionTokens:   int(resp.Usage.CompletionTokens),
+			TotalTokens:        int(resp.Usage.TotalTokens),
+			CachedPromptTokens: int(resp.Usage.PromptTokensDetails.CachedTokens),
 		}
 		if resp.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
 			result.Usage.ReasoningTokens = int(resp.Usage.CompletionTokensDetails.ReasoningTokens)
@@ -658,7 +876,7 @@ func convertToolChoice(choice any) openai.ChatCompletionToolChoiceOptionUnionPar
 		}
 	case providers.ToolChoice:
 		if v.Function != nil {
-			return openai.ChatCompletionToolChoiceOptionParamOfChatCompletionNamedToolChoice(
+			return openai.ToolChoiceOptionFunctionToolChoice(
 				openai.ChatCompletionNamedToolChoiceFunctionParam{
 					Name: v.Function.Name,
 				},
@@ -671,16 +889,14 @@ func convertToolChoice(choice any) openai.ChatCompletionToolChoiceOptionUnionPar
 }
 
 // convertTools converts provider tools to OpenAI format.
-func convertTools(tools []providers.Tool) []openai.ChatCompletionToolParam {
-	result := make([]openai.ChatCompletionToolParam, 0, len(tools))
+func convertTools(tools []providers.Tool) []openai.ChatCompletionToolUnionParam {
+	result := make([]openai.ChatCompletionToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		result = append(result, openai.ChatCompletionToolParam{
-			Function: openai.FunctionDefinitionParam{
-				Name:        tool.Function.Name,
-				Description: openai.String(tool.Function.Description),
-				Parameters:  openai.FunctionParameters(tool.Function.Parameters),
-			},
-		})
+		result = append(result, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+			Name:        tool.Function.Name,
+			Description: openai.String(tool.Function.Description),
+			Parameters:  openai.FunctionParameters(tool.Function.Parameters),
+		}))
 	}
 	return result
 }
@@ -714,6 +930,31 @@ func resolveAPIKey(cfg *config.Config, compatCfg CompatibleConfig) string {
 	return cfg.APIKey
 }
 
+// sdkEnvHeaderDeletions returns options that remove headers openai-go injects
+// from OPENAI_CUSTOM_HEADERS. The SDK reads that variable unconditionally, which
+// would forward its values to every OpenAI-compatible backend (including
+// third-party hosts). Parsing mirrors the SDK: one "Name: value" per line.
+// Headers set via config.WithHeader are applied at the transport layer and are
+// unaffected.
+func sdkEnvHeaderDeletions() []option.RequestOption {
+	raw, ok := os.LookupEnv(envSDKCustomHeaders)
+	if !ok {
+		return nil
+	}
+
+	lines := strings.Split(raw, "\n")
+	opts := make([]option.RequestOption, 0, len(lines))
+	for _, line := range lines {
+		name, _, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		opts = append(opts, option.WithHeaderDel(strings.TrimSpace(name)))
+	}
+
+	return opts
+}
+
 // validateCompatibleConfig validates the compatible provider configuration.
 func validateCompatibleConfig(cfg CompatibleConfig) error {
 	if cfg.Name == "" {
@@ -739,4 +980,31 @@ func validateCompletionParams(params providers.CompletionParams) error {
 	}
 
 	return nil
+}
+
+// withAPIErrorDetail wraps originalErr with the structured message, code and
+// type parsed from the API error body. The wrapped error remains reachable via
+// errors.As/errors.Is. Request URLs and raw bodies are deliberately omitted.
+func withAPIErrorDetail(apiErr *openai.Error, originalErr error) error {
+	attrs := make([]string, 0, 2)
+	if apiErr.Code != "" {
+		attrs = append(attrs, "code="+apiErr.Code)
+	}
+	if apiErr.Type != "" {
+		attrs = append(attrs, "type="+apiErr.Type)
+	}
+
+	parts := make([]string, 0, 2)
+	if apiErr.Message != "" {
+		parts = append(parts, apiErr.Message)
+	}
+	if len(attrs) > 0 {
+		parts = append(parts, "("+strings.Join(attrs, ", ")+")")
+	}
+
+	if len(parts) == 0 {
+		return originalErr
+	}
+
+	return fmt.Errorf("%w: %s", originalErr, strings.Join(parts, " "))
 }
