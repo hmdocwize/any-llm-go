@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   check-version:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
