@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# One run per PR: a new push cancels that PR's previous run. Every other event gets a group of its own
+# (run_id), so a push or a scheduled run is never cancelled or skipped: a shared group would drop runs,
+# because GitHub cancels a pending run when a newer one queues (hmdocwize/portal#1741).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Test
