@@ -1,6 +1,6 @@
 module github.com/mozilla-ai/any-llm-go
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.80.0
